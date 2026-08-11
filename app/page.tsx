@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@supabase/supabase-js";
+import Image from "next/image";
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 
 type Tab = "overview" | "queue" | "leaderboard" | "imports";
@@ -83,10 +84,31 @@ type TeamMetric = {
   sourceNotes: number;
 };
 
-function getSupabase(): SupabaseClient | null {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key = process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY;
-  return url && key ? createClient(url, key) : null;
+type OtpFunctionResponse = {
+  success?: boolean;
+  message?: string;
+  access_token?: string;
+  refresh_token?: string;
+};
+
+async function invokeOtpFunction(
+  supabase: SupabaseClient,
+  body: { action: "generate" | "verify"; email: string; code?: string },
+): Promise<OtpFunctionResponse> {
+  const { data, error } = await supabase.functions.invoke<OtpFunctionResponse>("topup-otp", { body });
+  if (!error) return data ?? {};
+
+  let message = error.message || "The verification service is unavailable.";
+  const context = (error as { context?: Response }).context;
+  if (context) {
+    try {
+      const payload = await context.json() as { error?: string; message?: string };
+      message = payload.error || payload.message || message;
+    } catch {
+      // Keep the SDK error when the response is not JSON.
+    }
+  }
+  throw new Error(message);
 }
 
 function formatDate(value?: string | null) {
@@ -195,9 +217,10 @@ function ownerMatchesUser(owner: string | null | undefined, userName: string) {
 }
 
 export default function Home() {
-  const [supabase] = useState(() => getSupabase());
+  const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
   const [session, setSession] = useState<Session | null>(null);
-  const [authReady, setAuthReady] = useState(() => !supabase);
+  const [authReady, setAuthReady] = useState(false);
+  const [connectionError, setConnectionError] = useState("");
   const [email, setEmail] = useState("");
   const [code, setCode] = useState("");
   const [authStep, setAuthStep] = useState<"email" | "code">("email");
@@ -222,6 +245,29 @@ export default function Home() {
 
   const userEmail = session?.user.email ?? "";
   const userName = ((session?.user.user_metadata?.full_name as string | undefined) ?? userEmail.split("@")[0]?.replace(/[._]/g, " ")) || "Team member";
+
+  useEffect(() => {
+    let active = true;
+
+    async function connect() {
+      try {
+        const response = await fetch("/api/supabase-config", { cache: "no-store" });
+        const config = await response.json() as { url?: string; publishableKey?: string; error?: string };
+        if (!response.ok || !config.url || !config.publishableKey) {
+          throw new Error(config.error || "The secure database connection is unavailable.");
+        }
+        if (active) setSupabase(createClient(config.url, config.publishableKey));
+      } catch (error) {
+        if (active) {
+          setConnectionError(error instanceof Error ? error.message : "The secure database connection is unavailable.");
+          setAuthReady(true);
+        }
+      }
+    }
+
+    connect();
+    return () => { active = false; };
+  }, []);
 
   const loadPeople = useCallback(async () => {
     if (!supabase || !session) return;
@@ -290,20 +336,40 @@ export default function Home() {
     if (!email.toLowerCase().endsWith("@unicity.com")) { setAuthMessage("Use your @unicity.com employee email."); return; }
     if (!supabase) { setAuthMessage("Top Up cannot sign in because its database connection is missing."); return; }
     setAuthBusy(true);
-    const { error } = await supabase.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: window.location.origin } });
-    setAuthBusy(false);
-    if (error) setAuthMessage(error.message);
-    else { setAuthStep("code"); setAuthMessage("We sent a secure sign-in code or link to your inbox."); }
+    try {
+      await invokeOtpFunction(supabase, { action: "generate", email: email.trim().toLowerCase() });
+      setAuthStep("code");
+      setAuthMessage("We sent a secure six-digit sign-in code to your inbox.");
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "The verification code could not be sent.");
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function verifyOtp(event: FormEvent) {
     event.preventDefault();
     if (!supabase) return;
     setAuthBusy(true);
-    const { data, error } = await supabase.auth.verifyOtp({ email, token: code.replace(/\s/g, ""), type: "email" });
-    setAuthBusy(false);
-    if (error) setAuthMessage(error.message);
-    else if (data.session) setSession(data.session);
+    setAuthMessage("");
+    try {
+      const result = await invokeOtpFunction(supabase, {
+        action: "verify",
+        email: email.trim().toLowerCase(),
+        code: code.replace(/\s/g, ""),
+      });
+      if (!result.access_token || !result.refresh_token) throw new Error("The secure session could not be created.");
+      const { data, error } = await supabase.auth.setSession({
+        access_token: result.access_token,
+        refresh_token: result.refresh_token,
+      });
+      if (error) throw error;
+      if (data.session) setSession(data.session);
+    } catch (error) {
+      setAuthMessage(error instanceof Error ? error.message : "The verification code could not be verified.");
+    } finally {
+      setAuthBusy(false);
+    }
   }
 
   async function signOut() {
@@ -418,18 +484,17 @@ export default function Home() {
     link.href = url; link.download = "topup-work-queue.csv"; link.click(); URL.revokeObjectURL(url);
   }
 
-  if (!authReady) return <main className="loading-screen"><div className="brand-mark small">U</div><span>Preparing Top Up…</span></main>;
+  if (!authReady) return <main className="loading-screen"><Image className="unicity-logo loading-logo" src="/unicity-corp-logo-dark.png" alt="Unicity" width={532} height={96} priority unoptimized /><span>Preparing Top Up…</span></main>;
 
   if (!session) return (
     <main className="auth-shell">
-      <header className="auth-header"><div className="wordmark">UNICITY<span>.</span></div><div className="header-actions"><button className="language"><span>◎</span> EN</button></div></header>
+      <header className="auth-header"><Image className="unicity-logo auth-header-logo" src="/unicity-corp-logo-dark.png" alt="Unicity" width={532} height={96} priority unoptimized /><div className="header-actions"><button className="language"><span>◎</span> EN</button></div></header>
       <section className="auth-stage">
         <div className="auth-card">
-          <div className="brand-mark">U</div><div className="product-kicker">TOP UP</div>
-          <h1>{authStep === "email" ? "Employee Login" : "Check your inbox"}</h1>
-          <p>{authStep === "email" ? "Use your Unicity email to access the Americas sales workspace." : `Enter the six-digit code sent to ${email}.`}</p>
+          <Image className="unicity-logo auth-card-logo" src="/unicity-corp-logo-dark.png" alt="Unicity" width={532} height={96} priority unoptimized /><div className="product-kicker">TOP UP</div>
+          {authStep === "code" && <><h1>Check your inbox</h1><p>Enter the six-digit code sent to {email}.</p></>}
           {authStep === "email" ? <form onSubmit={requestOtp}><label htmlFor="email">Email</label><div className="input-wrap"><Mail size={18} /><input id="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@unicity.com" type="email" required autoComplete="email" /></div><button className="primary-button full" disabled={authBusy || !supabase}>{authBusy ? "Sending…" : "Continue"}<ArrowRight size={17} /></button></form> : <form onSubmit={verifyOtp}><label htmlFor="code">Secure code</label><input id="code" className="code-input" value={code} onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" inputMode="numeric" required /><button className="primary-button full" disabled={authBusy || code.length !== 6}>{authBusy ? "Verifying…" : "Verify & sign in"}<ShieldCheck size={17} /></button><button type="button" className="text-button" onClick={() => setAuthStep("email")}>Use a different email</button></form>}
-          {(authMessage || !supabase) && <div className="auth-message"><CircleAlert size={16} />{authMessage || "Top Up is waiting for its secure database connection."}</div>}
+          {(authMessage || connectionError) && <div className="auth-message"><CircleAlert size={16} />{authMessage || connectionError}</div>}
       <div className="secure-note"><ShieldCheck size={15} /> Passwordless access · Unicity employees only</div>
         </div>
         <footer><a href="https://unicity.com">Unicity International</a><span>|</span><span>Employee workspace</span></footer>
@@ -442,7 +507,7 @@ export default function Home() {
   const sourcePeriod = formatPeriod(people.find((person) => person.source_period)?.source_period);
 
   return <div className="app-shell">
-    <header className="topbar"><div className="topbar-left"><div className="wordmark light">UNICITY<span>.</span></div><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu"><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></div></div></header>
+    <header className="topbar"><div className="topbar-left"><Image className="unicity-logo topbar-logo" src="/unicity-corp-logo-light.webp" alt="Unicity" width={1834} height={341} priority unoptimized /><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu"><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></div></div></header>
     <div className="workspace"><aside className="sidebar"><nav><button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><LayoutDashboard size={19} /> Overview</button><button className={tab === "queue" ? "active" : ""} onClick={() => setTab("queue")}><Users size={19} /> Work queue <span className="nav-count">{people.length}</span></button><button className={tab === "leaderboard" ? "active" : ""} onClick={() => setTab("leaderboard")}><Trophy size={19} /> Team coverage</button>{isAdmin && <button className={tab === "imports" ? "active" : ""} onClick={() => setTab("imports")}><UploadCloud size={19} /> Imports</button>}</nav><div className="sidebar-bottom"><div className="close-card"><span>{sourcePeriod.toUpperCase()}</span><strong>Source coverage</strong><p>{contacted.toLocaleString()} of {people.length.toLocaleString()} profiles have a recorded contact owner.</p><div className="mini-progress"><i style={{ width: `${coverage}%` }} /></div><b>{coverage}% recorded</b></div><button className="signout" onClick={signOut}><LogOut size={18} /> Sign out</button></div></aside>
       <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured July source import…" loading /> : <>{tab === "overview" && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={setSelected} onNavigate={setTab} />}{tab === "queue" && <Queue people={filteredPeople} allPeople={people} userName={userName} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} onOpen={setSelected} onExport={exportQueue} />}{tab === "leaderboard" && <Leaderboard people={people} sourcePeriod={sourcePeriod} />}{tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} onImport={importCsv} />}</>}</main>
     </div>
