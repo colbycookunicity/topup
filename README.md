@@ -1,4 +1,18 @@
-# vinext-starter
+# Top Up
+
+Top Up is an employee-only Unicity Americas workspace for coordinating new-distributor outreach, rank pushes, PCM follow-up, monthly CSV imports, and team activity. It includes passwordless Supabase authentication, row-level security, and a privacy-safe demo mode.
+
+## Application setup
+
+1. Create a Supabase project and apply the migrations in `supabase/migrations/`.
+2. Configure `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` in the deployment environment.
+3. Restrict Supabase Auth redirects to the deployed domain.
+4. Assign the designated administrator `topup_role: admin` in Supabase Auth `app_metadata`. The database policies and interface both use this claim.
+5. Copy `.openai/hosting.example.json` to `.openai/hosting.json` only for local/OpenAI Sites deployment work and insert that environment's project identifier. The real binding is intentionally not committed.
+
+The checked-in demo records are fictional and use reserved example addresses and phone numbers. Do not commit exported distributor or employee data.
+
+## Runtime foundation
 
 A clean full-stack starter running on
 [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and
