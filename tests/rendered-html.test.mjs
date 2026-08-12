@@ -92,7 +92,75 @@ test("uses Hydra for OTP delivery and keeps Supabase sessions for RLS", async ()
   assert.match(edgeFunction, /OTP_RATE_LIMIT_PER_EMAIL = 50/);
   assert.match(edgeFunction, /OTP_RATE_LIMIT_PER_IP = 100/);
   assert.match(edgeFunction, /new validation code generated/);
+  assert.match(edgeFunction, /nestedString\(hydra, "validationid"\)/);
+  assert.match(edgeFunction, /A valid verification code is already waiting for you/);
+  assert.match(edgeFunction, /events\.unicity\.com\/api\/auth/);
+  assert.match(edgeFunction, /eventsAdminGenerate/);
+  assert.match(edgeFunction, /eventsAdminVerify/);
+  assert.match(edgeFunction, /verifiedEmail !== email \|\| role !== "admin"/);
+  assert.match(page, /result\.success !== true/);
+  assert.match(page, /setAuthStep\("code"\)/);
+  assert.match(page, /Verify your email/);
+  assert.match(page, /code-cells/);
+  assert.match(page, /Resend code/);
   assert.match(migration, /enable row level security/);
   assert.match(migration, /revoke all .* anon, authenticated/);
   assert.match(denyPolicy, /to anon, authenticated[\s\S]*using \(false\)[\s\S]*with check \(false\)/);
+});
+
+test("supports personal boards, shared activity, and location filters", async () => {
+  const [page, releaseMigration, sharingMigration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812020000_add_distributor_release_and_private_queues.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812030000_shared_activity_and_location_filters.sql", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /My Board/);
+  assert.match(page, /Only distributors you have claimed and are actively working with/);
+  assert.match(page, /assigned_to: null, assigned_name: null, status: "unassigned"/);
+  assert.doesNotMatch(page, /update\(\{[^}]*notes:\s*null[^}]*\}\)/);
+  assert.match(page, /All activity notes and history will be preserved/);
+  assert.match(page, /Activity history/);
+  assert.match(page, /All distributors/);
+  assert.match(page, /Filter by country/i);
+  assert.match(page, /Filter by state/i);
+  assert.match(page, /Add team note/);
+  assert.match(page, /\.is\("assigned_name", null\)/);
+  assert.match(page, /teamActivities/);
+  assert.match(releaseMigration, /assigned_to = \(select auth\.uid\(\)\)/);
+  assert.match(releaseMigration, /assigned_to is null and assigned_name is null/);
+  assert.match(sharingMigration, /employees can view all distributors/);
+  assert.match(sharingMigration, /employees can view all team activity/);
+  assert.match(sharingMigration, /employees can add team activity/);
+  assert.match(sharingMigration, /user_id = \(select auth\.uid\(\)\)/);
+});
+
+test("supports named users and protected admin user management", async () => {
+  const [page, edgeFunction, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/functions/topup-otp/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812040000_add_user_directory_and_last_login.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /Manage users/);
+  assert.match(page, /Last login/);
+  assert.match(page, /topup_user_directory/);
+  assert.match(edgeFunction, /last_login_at/);
+  assert.match(migration, /alexandra\.rodriguez@unicity\.com', 'Alexa'/);
+  assert.match(migration, /carolina\.martinez@unicity\.com', 'Caro'/);
+  assert.match(migration, /admins can update user display names/);
+});
+
+test("allows users to edit their own case-preserved display name", async () => {
+  const [page, migration, boardMigration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812050000_allow_self_service_display_names.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812050100_sync_display_names_to_current_board.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /Your profile/);
+  assert.match(page, /Capitalization is preserved exactly as entered/);
+  assert.match(page, /profileName\.trim\(\)/);
+  assert.match(migration, /employees can update their own display name/);
+  assert.match(migration, /update public\.profiles[\s\S]*set full_name = new\.display_name/);
+  assert.match(boardMigration, /update public\.distributors[\s\S]*set assigned_name = new\.display_name/);
+  assert.match(migration, /revoke all on function private\.sync_topup_directory_display_name\(\) from public, anon, authenticated/);
 });
