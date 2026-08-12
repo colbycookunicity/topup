@@ -81,8 +81,8 @@ test("uses Hydra for OTP delivery and keeps Supabase sessions for RLS", async ()
   const [page, edgeFunction, migration, denyPolicy] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../supabase/functions/topup-otp/index.ts", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260811212721_add_hydra_otp_bridge.sql", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260811213052_deny_client_otp_challenge_access.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260811212936_add_hydra_otp_bridge.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260811213112_deny_client_otp_challenge_access.sql", import.meta.url), "utf8"),
   ]);
 
   assert.doesNotMatch(page, /auth\.signInWithOtp/);
@@ -111,8 +111,8 @@ test("uses Hydra for OTP delivery and keeps Supabase sessions for RLS", async ()
 test("supports personal boards, shared activity, and location filters", async () => {
   const [page, releaseMigration, sharingMigration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260812020000_add_distributor_release_and_private_queues.sql", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260812030000_shared_activity_and_location_filters.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812010754_add_distributor_release_and_private_queues.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812012409_shared_activity_and_location_filters.sql", import.meta.url), "utf8"),
   ]);
 
   assert.match(page, /My Board/);
@@ -139,7 +139,7 @@ test("supports named users and protected admin user management", async () => {
   const [page, edgeFunction, migration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../supabase/functions/topup-otp/index.ts", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260812040000_add_user_directory_and_last_login.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812014831_add_user_directory_and_last_login.sql", import.meta.url), "utf8"),
   ]);
   assert.match(page, /Manage users/);
   assert.match(page, /Last login/);
@@ -153,8 +153,8 @@ test("supports named users and protected admin user management", async () => {
 test("allows users to edit their own case-preserved display name", async () => {
   const [page, migration, boardMigration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260812050000_allow_self_service_display_names.sql", import.meta.url), "utf8"),
-    readFile(new URL("../supabase/migrations/20260812050100_sync_display_names_to_current_board.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812015501_allow_self_service_display_names.sql", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260812015642_sync_display_names_to_current_board.sql", import.meta.url), "utf8"),
   ]);
   assert.match(page, /Your profile/);
   assert.match(page, /Capitalization is preserved exactly as entered/);

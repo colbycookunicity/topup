@@ -44,3 +44,6 @@ next-env.d.ts
 # Generated and workspace-specific OpenAI Sites files
 /.vinext/
 /.openai/hosting.json
+
+# SpecStory extension artifacts
+/.specstory/

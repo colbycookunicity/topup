@@ -6,6 +6,7 @@ declare const Deno: {
 };
 
 const HYDRA_API_BASE = "https://hydra.unicity.net/v6";
+const EVENTS_AUTH_API_BASE = "https://events.unicity.com/api/auth";
 const RATE_LIMIT_WINDOW_MS = 10 * 60 * 1000;
 const OTP_RATE_LIMIT_PER_EMAIL = 50;
 const OTP_RATE_LIMIT_PER_IP = 100;
@@ -16,6 +17,7 @@ const ALLOWED_ORIGINS = new Set([
 ]);
 
 type Json = Record<string, unknown>;
+type AdminClient = ReturnType<typeof createClient>;
 
 function corsHeaders(origin: string | null): HeadersInit {
   return {
@@ -52,6 +54,20 @@ function record(value: unknown): Json {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Json : {};
 }
 
+function nestedString(payload: unknown, normalizedKey: string, depth = 0): string | null {
+  if (depth > 5 || !payload || typeof payload !== "object") return null;
+  const entries = Object.entries(payload as Json);
+  for (const [key, value] of entries) {
+    if (key.toLowerCase().replace(/[^a-z0-9]/g, "") !== normalizedKey) continue;
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  for (const [, value] of entries) {
+    const nested = nestedString(value, normalizedKey, depth + 1);
+    if (nested) return nested;
+  }
+  return null;
+}
+
 function hydraMessage(payload: Json): string {
   const nested = record(payload.data);
   return typeof payload.message === "string"
@@ -59,6 +75,109 @@ function hydraMessage(payload: Json): string {
     : typeof nested.message === "string"
       ? nested.message
       : "The verification service rejected the request.";
+}
+
+function apiMessage(payload: Json, fallback: string): string {
+  const nested = record(payload.data);
+  return typeof payload.error === "string"
+    ? payload.error
+    : typeof payload.message === "string"
+      ? payload.message
+      : typeof nested.message === "string"
+        ? nested.message
+        : fallback;
+}
+
+async function eventsAdminGenerate(email: string): Promise<{ success: boolean; message: string; status: number }> {
+  const response = await fetch(`${EVENTS_AUTH_API_BASE}/otp/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  const payload = record(await response.json().catch(() => ({})));
+  const message = apiMessage(payload, "The administrator verification code could not be sent.");
+  const replacementGenerated = message.toLowerCase().includes("new validation code generated");
+  return {
+    success: (response.ok && payload.success === true) || replacementGenerated,
+    message,
+    status: response.status,
+  };
+}
+
+async function eventsAdminVerify(email: string, code: string): Promise<{ success: boolean; message: string }> {
+  const response = await fetch(`${EVENTS_AUTH_API_BASE}/otp/validate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, code }),
+  });
+  const payload = record(await response.json().catch(() => ({})));
+  const token = typeof payload.token === "string" ? payload.token : "";
+  if (!response.ok || payload.success !== true || !token) {
+    return { success: false, message: apiMessage(payload, "The verification code is invalid or expired.") };
+  }
+  const identityResponse = await fetch(`${EVENTS_AUTH_API_BASE}/me`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const identityPayload = record(await identityResponse.json().catch(() => ({})));
+  const user = record(identityPayload.user);
+  const verifiedEmail = typeof user.email === "string" ? user.email.trim().toLowerCase() : "";
+  const role = typeof user.role === "string" ? user.role.toLowerCase() : "";
+  if (!identityResponse.ok || verifiedEmail !== email || role !== "admin") {
+    return { success: false, message: "The administrator identity could not be confirmed." };
+  }
+  return { success: true, message: "Administrator identity verified." };
+}
+
+async function createSupabaseSession(
+  origin: string | null,
+  admin: AdminClient,
+  supabaseUrl: string,
+  publishableKey: string,
+  email: string,
+  isTopUpAdmin: boolean,
+): Promise<Response> {
+  let link = await admin.auth.admin.generateLink({ type: "magiclink", email });
+  if (link.error) {
+    const created = await admin.auth.admin.createUser({ email, email_confirm: true });
+    if (created.error && !created.error.message.toLowerCase().includes("already")) {
+      return json(origin, { error: "The employee account could not be created." }, 500);
+    }
+    link = await admin.auth.admin.generateLink({ type: "magiclink", email });
+  }
+  const tokenHash = link.data?.properties?.hashed_token;
+  if (link.error || !tokenHash) return json(origin, { error: "The secure sign-in token could not be created." }, 500);
+
+  const sessionClient = createClient(supabaseUrl, publishableKey, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+  const { data: verified, error: sessionError } = await sessionClient.auth.verifyOtp({ token_hash: tokenHash, type: "email" });
+  if (sessionError || !verified.session) return json(origin, { error: "The secure session could not be created." }, 500);
+
+  const fallbackName = email.split("@")[0]
+    .split(/[._-]+/)
+    .filter(Boolean)
+    .map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1).toLowerCase()}`)
+    .join(" ") || "Team member";
+  const { data: directoryEntry } = await admin.from("topup_user_directory").select("display_name").eq("email", email).maybeSingle();
+  const displayName = (directoryEntry as { display_name?: string } | null)?.display_name?.trim() || fallbackName;
+  const { error: directoryError } = await admin.from("topup_user_directory").upsert({
+    email,
+    display_name: displayName,
+    last_login_at: new Date().toISOString(),
+    is_admin: isTopUpAdmin,
+  }, { onConflict: "email" });
+  const { error: profileError } = await admin.from("profiles").upsert({
+    id: verified.session.user.id,
+    email,
+    full_name: displayName,
+  }, { onConflict: "id" });
+  if (directoryError || profileError) return json(origin, { error: "The employee profile could not be prepared." }, 500);
+
+  return json(origin, {
+    success: true,
+    access_token: verified.session.access_token,
+    refresh_token: verified.session.refresh_token,
+  });
 }
 
 Deno.serve(async (request: Request) => {
@@ -88,8 +207,36 @@ Deno.serve(async (request: Request) => {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  const { data: topUpAdmin, error: topUpAdminError } = await admin.from("topup_admins").select("email").eq("email", email).maybeSingle();
+  if (topUpAdminError) return json(origin, { error: "Administrator access could not be checked." }, 503);
+  const isTopUpAdmin = Boolean(topUpAdmin);
+
   if (action === "generate") {
+    if (isTopUpAdmin) {
+      const generated = await eventsAdminGenerate(email);
+      if (!generated.success) {
+        const status = generated.status === 429 ? 429 : 400;
+        return json(origin, { error: generated.message }, status, status === 429 ? { "Retry-After": "60" } : {});
+      }
+      return json(origin, { success: true, message: "Verification code sent." });
+    }
+
     const ip = clientIp(request);
+    const now = new Date().toISOString();
+    const { data: activeChallenge, error: activeChallengeError } = await admin
+      .from("topup_otp_challenges")
+      .select("id")
+      .eq("email", email)
+      .is("verified_at", null)
+      .gt("expires_at", now)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (activeChallengeError) return json(origin, { error: "The pending verification could not be checked." }, 503);
+    if (activeChallenge) {
+      return json(origin, { success: true, message: "A valid verification code is already waiting for you." });
+    }
+
     const cutoff = new Date(Date.now() - RATE_LIMIT_WINDOW_MS).toISOString();
     const [emailQuota, ipQuota] = await Promise.all([
       admin.from("topup_otp_challenges").select("id", { count: "exact", head: true }).eq("email", email).gte("created_at", cutoff),
@@ -112,17 +259,29 @@ Deno.serve(async (request: Request) => {
     const hydra = record(await hydraResponse.json().catch(() => ({})));
     const hydraData = record(hydra.data);
     const message = hydraMessage(hydra);
-    const validationId = typeof hydraData.validation_id === "string" ? hydraData.validation_id : null;
+    // Hydra's normal and resend responses do not always nest the challenge at
+    // the same depth. Find the exact validation_id field without accepting an
+    // unrelated generic `id` value.
+    const validationId = nestedString(hydra, "validationid");
     const generated = Boolean(validationId) && (
       (hydraResponse.ok && hydra.success === true)
       || message.toLowerCase().includes("new validation code generated")
     );
     if (!generated) {
       const retryingTooSoon = message.toLowerCase().includes("wait before requesting");
+      if (message.toLowerCase().includes("validation code generated")) {
+        console.error("Hydra generated an OTP without a readable validation_id", {
+          status: hydraResponse.status,
+          topLevelKeys: Object.keys(hydra),
+          dataKeys: Object.keys(hydraData),
+        });
+        return json(origin, { error: "The code was emailed, but its verification challenge could not be saved. Please wait one minute and try again." }, 502);
+      }
       return json(origin, { error: message }, retryingTooSoon ? 429 : 400, retryingTooSoon ? { "Retry-After": "60" } : {});
     }
 
-    const suppliedExpiry = typeof hydraData.expires_at === "string" ? new Date(hydraData.expires_at) : null;
+    const suppliedExpiryValue = nestedString(hydra, "expiresat");
+    const suppliedExpiry = suppliedExpiryValue ? new Date(suppliedExpiryValue) : null;
     const expiresAt = suppliedExpiry && Number.isFinite(suppliedExpiry.getTime())
       ? suppliedExpiry.toISOString()
       : new Date(Date.now() + 10 * 60 * 1000).toISOString();
@@ -142,6 +301,12 @@ Deno.serve(async (request: Request) => {
     const code = typeof body.code === "string" ? body.code.trim() : "";
     if (!/^\d{6}$/.test(code)) return json(origin, { error: "Enter the six-digit code from your email." }, 400);
 
+    if (isTopUpAdmin) {
+      const verifiedAdmin = await eventsAdminVerify(email, code);
+      if (!verifiedAdmin.success) return json(origin, { error: verifiedAdmin.message }, 400);
+      return await createSupabaseSession(origin, admin, supabaseUrl, publishableKey, email, isTopUpAdmin);
+    }
+
     const { data: challenge, error: challengeError } = await admin
       .from("topup_otp_challenges")
       .select("id,email,validation_id,expires_at")
@@ -157,7 +322,7 @@ Deno.serve(async (request: Request) => {
     const hydraResponse = await fetch(`${HYDRA_API_BASE}/otp/magic-link`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, code, validation_id: challenge.validation_id }),
+      body: JSON.stringify({ email, code, validation_id: (challenge as { validation_id: string }).validation_id }),
     });
     const hydra = record(await hydraResponse.json().catch(() => ({})));
     const message = hydraMessage(hydra);
@@ -165,35 +330,14 @@ Deno.serve(async (request: Request) => {
     const verifiedEmployeeWithoutCustomer = message.toLowerCase().includes("customer not found");
     if (!verifiedByHydra && !verifiedEmployeeWithoutCustomer) return json(origin, { error: message }, 400);
 
-    let link = await admin.auth.admin.generateLink({ type: "magiclink", email });
-    if (link.error) {
-      const created = await admin.auth.admin.createUser({ email, email_confirm: true });
-      if (created.error && !created.error.message.toLowerCase().includes("already")) {
-        return json(origin, { error: "The employee account could not be created." }, 500);
-      }
-      link = await admin.auth.admin.generateLink({ type: "magiclink", email });
-    }
-    const tokenHash = link.data?.properties?.hashed_token;
-    if (link.error || !tokenHash) return json(origin, { error: "The secure sign-in token could not be created." }, 500);
-
-    const sessionClient = createClient(supabaseUrl, publishableKey, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
-    const { data: verified, error: sessionError } = await sessionClient.auth.verifyOtp({ token_hash: tokenHash, type: "email" });
-    if (sessionError || !verified.session) return json(origin, { error: "The secure session could not be created." }, 500);
-
     const { error: updateError } = await admin
       .from("topup_otp_challenges")
       .update({ verified_at: new Date().toISOString() })
-      .eq("id", challenge.id)
+      .eq("id", (challenge as { id: string }).id)
       .is("verified_at", null);
     if (updateError) return json(origin, { error: "The verification could not be finalized." }, 500);
 
-    return json(origin, {
-      success: true,
-      access_token: verified.session.access_token,
-      refresh_token: verified.session.refresh_token,
-    });
+    return await createSupabaseSession(origin, admin, supabaseUrl, publishableKey, email, isTopUpAdmin);
   }
 
   return json(origin, { error: "Unknown verification action." }, 400);
