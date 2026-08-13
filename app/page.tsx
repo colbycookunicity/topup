@@ -75,6 +75,15 @@ type Person = {
   notes?: string | null;
 };
 
+type PendingImport = {
+  fileName: string;
+  sourcePeriod: string;
+  reportType: string;
+  records: Omit<Person, "id">[];
+  newCount: number;
+  updateCount: number;
+};
+
 type ImportHistory = {
   id: string;
   file_name: string;
@@ -315,6 +324,7 @@ export default function Home() {
   const [toast, setToast] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState("");
+  const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [profileName, setProfileName] = useState("");
@@ -726,10 +736,10 @@ export default function Home() {
     setSelected(next); setActivityOpen(false); setActivityNote(""); notify(canUpdateSummary ? "Activity logged." : "Team context note added.");
   }
 
-  async function importCsv(file: File) {
+  async function prepareImport(file: File) {
     if (!supabase || !session || !isAdmin) { setImportResult("Only a signed-in Top Up administrator can import data."); return; }
     if (file.size > 10 * 1024 * 1024) { setImportResult("Import stopped: the CSV exceeds 10 MB."); return; }
-    setImportBusy(true); setImportResult("");
+    setImportBusy(true); setImportResult(""); setPendingImport(null);
     try {
       const rows = parseCsv(await file.text());
       if (!rows.length) throw new Error("Import stopped: the CSV has no data rows.");
@@ -784,13 +794,28 @@ export default function Home() {
           source_file_name: file.name,
         };
       });
-      for (let index = 0; index < records.length; index += 200) {
-        const { error } = await supabase.from("distributors").upsert(records.slice(index, index + 200), { onConflict: "external_id" });
+      const newCount = ids.filter((id) => !existing.has(id)).length;
+      const reportType = newReport ? "New Distributor report" : pcmReport ? "PCM report" : rankReport ? "Rank (D/SD/ED) report" : "General distributor report";
+      setPendingImport({ fileName: file.name, sourcePeriod, reportType, records: records as Omit<Person, "id">[], newCount, updateCount: ids.length - newCount });
+    } catch (error) {
+      setImportResult(error instanceof Error ? error.message : "The CSV could not be read. No records were written.");
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  async function confirmImport() {
+    if (!supabase || !session || !isAdmin || !pendingImport) return;
+    setImportBusy(true);
+    try {
+      for (let index = 0; index < pendingImport.records.length; index += 200) {
+        const { error } = await supabase.from("distributors").upsert(pendingImport.records.slice(index, index + 200), { onConflict: "external_id" });
         if (error) throw error;
       }
-      const { error: historyError } = await supabase.from("imports").insert({ file_name: file.name, row_count: records.length, source_period: sourcePeriod, imported_by: session.user.id, imported_by_name: userName, status: "complete" });
+      const { error: historyError } = await supabase.from("imports").insert({ file_name: pendingImport.fileName, row_count: pendingImport.records.length, source_period: pendingImport.sourcePeriod, imported_by: session.user.id, imported_by_name: userName, status: "complete" });
       if (historyError) throw historyError;
-      setImportResult(`${records.length.toLocaleString()} real records imported. Existing distributor IDs were updated without deleting activity or ownership.`);
+      setImportResult(`${pendingImport.records.length.toLocaleString()} real records imported. Existing distributor IDs were updated without deleting activity or ownership.`);
+      setPendingImport(null);
       await loadPeople();
       const { data } = await supabase.from("imports").select("id,file_name,row_count,imported_by_name,status,created_at").order("created_at", { ascending: false }).limit(10);
       setImports((data ?? []) as ImportHistory[]);
@@ -799,6 +824,11 @@ export default function Home() {
     } finally {
       setImportBusy(false);
     }
+  }
+
+  function cancelImport() {
+    setPendingImport(null);
+    setImportResult("Import cancelled. No records were written.");
   }
 
   function exportQueue() {
@@ -835,7 +865,7 @@ export default function Home() {
   return <div className="app-shell">
     <header className="topbar"><div className="topbar-left"><Image className="unicity-logo topbar-logo" src="/unicity-corp-logo-light.webp" alt="Unicity" width={1834} height={341} priority unoptimized /><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu-wrap"><button className="profile-menu" type="button" aria-expanded={profileOpen} aria-haspopup="dialog" onClick={() => { setProfileName(displayName || userName); setProfileOpen((open) => !open); }}><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></button>{profileOpen && <form className="profile-dropdown" onSubmit={saveProfileName}><div><strong>Your profile</strong><span>{userEmail}</span></div><label htmlFor="profile-name">Display name</label><input id="profile-name" value={profileName} onChange={(event) => setProfileName(event.target.value)} maxLength={80} autoComplete="name" autoFocus /><p>Capitalization is preserved exactly as entered.</p><button className="primary-button full" disabled={profileSaving || !profileName.trim() || profileName.trim() === displayName}>{profileSaving ? "Saving…" : "Save name"}</button></form>}</div></div></header>
     <div className="workspace"><aside className="sidebar"><nav>{isAdmin && <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><LayoutDashboard size={19} /> Overview</button>}<button className={tab === "mine" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("mine"); }}><UserRoundCheck size={19} /> My Board <span className="nav-count">{people.filter((person) => person.assigned_to === userId).length}</span></button><button className={tab === "queue" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("queue"); }}><Users size={19} /> {isAdmin ? "Work queue" : "All distributors"} <span className="nav-count">{people.length}</span></button><button className={tab === "leaderboard" ? "active" : ""} onClick={() => setTab("leaderboard")}><Trophy size={19} /> Team coverage</button>{isAdmin && <button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><UserCog size={19} /> Manage users</button>}{isAdmin && <button className={tab === "imports" ? "active" : ""} onClick={() => setTab("imports")}><UploadCloud size={19} /> Imports</button>}</nav><div className="sidebar-bottom"><div className="close-card"><span>{sourcePeriod.toUpperCase()}</span><strong>{isAdmin ? "Source coverage" : "My Board"}</strong><p>{isAdmin ? `${contacted.toLocaleString()} of ${people.length.toLocaleString()} profiles have a recorded contact owner.` : `${people.filter((person) => person.assigned_to === userId).length.toLocaleString()} distributors are currently assigned to you.`}</p>{isAdmin && <><div className="mini-progress"><i style={{ width: `${coverage}%` }} /></div><b>{coverage}% recorded</b></>}</div><button className="signout" onClick={signOut}><LogOut size={18} /> Sign out</button></div></aside>
-      <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>{tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}{tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "queue" && <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}{tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} onSave={saveUserName} />}{tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} onImport={importCsv} />}</>}</main>
+      <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>{tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}{tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "queue" && <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}{tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} onSave={saveUserName} />}{tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}</>}</main>
     </div>
     {selected && <PersonDrawer key={selected.id} person={selected} leader={selectedLeader} currentUserId={userId} isAdmin={isAdmin} users={users} activities={activities} activitiesLoading={activitiesLoading} releaseBusy={releaseBusy} onClose={() => setSelected(null)} onClaim={() => claim(selected)} onLog={() => setActivityOpen(true)} onRelease={() => release(selected)} onOpenLeader={openPerson} onAssign={(entry) => adminAssign(selected, entry)} />}
     {activityOpen && selected && <ActivityModal person={selected} type={activityType} setType={setActivityType} outcome={activityOutcome} setOutcome={setActivityOutcome} note={activityNote} setNote={setActivityNote} onClose={() => setActivityOpen(false)} onSave={saveActivity} />}
@@ -932,9 +962,9 @@ function UserEditor({ entry, saving, onSave }: { entry: UserDirectoryEntry; savi
   </div>;
 }
 
-function Imports({ busy, result, history, onImport }: { busy: boolean; result: string; history: ImportHistory[]; onImport: (file: File) => void }) {
+function Imports({ busy, result, history, pending, onImport, onConfirm, onCancel }: { busy: boolean; result: string; history: ImportHistory[]; pending: PendingImport | null; onImport: (file: File) => void; onConfirm: () => void; onCancel: () => void }) {
   const [dragging, setDragging] = useState(false);
-  return <><div className="page-heading"><div><span className="eyebrow">ADMIN TOOLS</span><h1>Monthly data imports</h1><p>Import real CSV exports; existing distributor IDs update one shared profile.</p></div><div className="admin-badge"><ShieldCheck size={16} /> Admin only</div></div><section className="import-grid"><div className="panel import-panel"><div className="panel-heading"><div><h3>Upload report</h3><p>CSV files exported from the monthly workbook</p></div><FileSpreadsheet size={22} /></div><label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && onImport(event.target.files[0])} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Validating and importing…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, or PCM report</p><small>Maximum 10 MB</small></label>{result && <div className={result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? "import-result error" : "import-result"}>{result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? <CircleAlert size={17} /> : <Check size={17} />}{result}</div>}<div className="mapping-note"><CircleAlert size={17} /><p><strong>No fabricated fallback values</strong><span>Rows without a valid distributor ID or name stop the import before writes. Missing source fields stay visibly “Not provided.” Existing ownership and activity are preserved.</span></p></div></div><div className="panel import-guide"><div className="panel-heading"><div><h3>Import sequence</h3><p>Monthly operating rhythm</p></div></div><ol><li><span>1</span><div><strong>New Distributor</strong><p>Welcome outreach and 10 Pack tracking</p></div></li><li><span>2</span><div><strong>D, SD, ED</strong><p>Rank target and total OV needed</p></div></li><li><span>3</span><div><strong>PCMs</strong><p>Presidential pathway opportunities</p></div></li></ol><div className="privacy-card"><ShieldCheck size={20} /><div><strong>Protected employee workspace</strong><p>Distributor data is read only after verified @unicity.com authentication and row-level security.</p></div></div></div></section><section className="panel recent-imports"><div className="panel-heading"><div><h3>Recent imports</h3><p>Live audit trail from Supabase</p></div></div>{history.map((file) => <div className="import-row" key={file.id}><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{file.file_name}</strong><span>{Number(file.row_count).toLocaleString()} records · Imported by {file.imported_by_name ?? "System import"}</span></div><time>{formatDate(file.created_at)}</time><span className={`status status-${file.status === "complete" ? "complete" : "follow-up"}`}><i />{file.status}</span></div>)}{!history.length && <div className="empty-inline">No imports have been recorded yet.</div>}</section></>;
+  return <><div className="page-heading"><div><span className="eyebrow">ADMIN TOOLS</span><h1>Monthly data imports</h1><p>Import real CSV exports; existing distributor IDs update one shared profile.</p></div><div className="admin-badge"><ShieldCheck size={16} /> Admin only</div></div><section className="import-grid"><div className="panel import-panel"><div className="panel-heading"><div><h3>Upload report</h3><p>CSV files exported from the monthly workbook</p></div><FileSpreadsheet size={22} /></div>{pending ? <div className="import-preview"><div className="preview-head"><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{pending.fileName}</strong><span>{pending.reportType} · {formatPeriod(pending.sourcePeriod)}</span></div></div><div className="preview-stats"><div><strong>{pending.records.length.toLocaleString()}</strong><span>data rows</span></div><div><strong>{pending.newCount.toLocaleString()}</strong><span>new profiles</span></div><div><strong>{pending.updateCount.toLocaleString()}</strong><span>existing updated</span></div></div><p className="preview-note">Nothing has been written yet. Existing profiles keep their ownership, notes, and activity history; only fields present in this file are refreshed.</p><div className="preview-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>Cancel</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}><Check size={17} /> {busy ? "Importing…" : `Import ${pending.records.length.toLocaleString()} records`}</button></div></div> : <label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && onImport(event.target.files[0])} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Reading and validating…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, or PCM report</p><small>Maximum 10 MB</small></label>}{result && <div className={result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? "import-result error" : "import-result"}>{result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? <CircleAlert size={17} /> : <Check size={17} />}{result}</div>}<div className="mapping-note"><CircleAlert size={17} /><p><strong>No fabricated fallback values</strong><span>Rows without a valid distributor ID or name stop the import before writes. Missing source fields stay visibly “Not provided.” Existing ownership and activity are preserved.</span></p></div></div><div className="panel import-guide"><div className="panel-heading"><div><h3>Import sequence</h3><p>Monthly operating rhythm</p></div></div><ol><li><span>1</span><div><strong>New Distributor</strong><p>Welcome outreach and 10 Pack tracking</p></div></li><li><span>2</span><div><strong>D, SD, ED</strong><p>Rank target and total OV needed</p></div></li><li><span>3</span><div><strong>PCMs</strong><p>Presidential pathway opportunities</p></div></li></ol><div className="privacy-card"><ShieldCheck size={20} /><div><strong>Protected employee workspace</strong><p>Distributor data is read only after verified @unicity.com authentication and row-level security.</p></div></div></div></section><section className="panel recent-imports"><div className="panel-heading"><div><h3>Recent imports</h3><p>Live audit trail from Supabase</p></div></div>{history.map((file) => <div className="import-row" key={file.id}><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{file.file_name}</strong><span>{Number(file.row_count).toLocaleString()} records · Imported by {file.imported_by_name ?? "System import"}</span></div><time>{formatDate(file.created_at)}</time><span className={`status status-${file.status === "complete" ? "complete" : "follow-up"}`}><i />{file.status}</span></div>)}{!history.length && <div className="empty-inline">No imports have been recorded yet.</div>}</section></>;
 }
 
 function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activities, activitiesLoading, releaseBusy, onClose, onClaim, onLog, onRelease, onOpenLeader, onAssign }: { person: Person; leader: Person | null; currentUserId: string; isAdmin: boolean; users: UserDirectoryEntry[]; activities: Activity[]; activitiesLoading: boolean; releaseBusy: boolean; onClose: () => void; onClaim: () => void; onLog: () => void; onRelease: () => void; onOpenLeader: (person: Person) => void; onAssign: (entry: UserDirectoryEntry | null) => void }) {
