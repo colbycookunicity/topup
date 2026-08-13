@@ -209,6 +209,7 @@ label { display: block; color: #26394a; font-size: 13px; font-weight: 650; margi
 .leader-card > svg { color: #8797a2; flex: 0 0 auto; }
 .touch-cell small.due-flag { color: var(--amber); font-weight: 700; }
 .toast.toast-error { background: #7a2b26; }
+.assign-select { width: 100%; margin-top: 10px; }
 .source-detail span { color: #85929b; }
 .source-timeline > i { background: var(--violet); box-shadow: 0 0 0 4px #efecf8; }
 .timeline-list { display: flex; flex-direction: column; gap: 18px; }
