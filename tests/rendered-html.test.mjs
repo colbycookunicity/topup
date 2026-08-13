@@ -190,3 +190,11 @@ test("keeps the current board visible during background auth refreshes", async (
   assert.match(page, /current\?\.user\.id === next\?\.user\.id/);
   assert.doesNotMatch(page, /const loadPeople[\s\S]*?setDataReady\(false\)/);
 });
+
+test("makes queue search matches and scoped counts understandable", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /personMatchesQuery\(person, query\)/);
+  assert.match(page, /count: scopedPeople\.length/);
+  assert.match(page, /results"} for “\{searchTerm\}”/);
+  assert.match(page, /Leader: \$\{person\.nearest_leader_name\}/);
+});
