@@ -150,6 +150,19 @@ test("supports named users and protected admin user management", async () => {
   assert.match(migration, /admins can update user display names/);
 });
 
+test("allows existing admins to add Unicity administrators", async () => {
+  const [page, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260813213500_add_admin_management.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /Add administrator/);
+  assert.match(page, /\.from\("topup_admins"\)\.insert/);
+  assert.match(page, /@unicity\\\.com/);
+  assert.match(migration, /admins can add Top Up administrators/);
+  assert.match(migration, /sam\.hughes@unicity\.com/);
+  assert.match(migration, /revoke all on function private\.sync_topup_directory_admin_role\(\) from public, anon, authenticated/);
+});
+
 test("links distributor UIDs to Portal and keeps email copy beside the visible address", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /portal\.unicity\.com\/#\/customers\/\$\{encodeURIComponent\(distributorId\)\}\/overview/);
