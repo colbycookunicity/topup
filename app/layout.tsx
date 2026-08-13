@@ -9,7 +9,7 @@ export const metadata: Metadata = {
   title: "Top Up",
   description: "Unicity Americas distributor outreach and month-end rank workspace.",
   other: { "codex-preview": "development" },
-  icons: { icon: "/unicity-corp-logo-dark.png", shortcut: "/unicity-corp-logo-dark.png" },
+  icons: { icon: "/favicon.png", shortcut: "/favicon.png", apple: "/favicon.png" },
 };
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {

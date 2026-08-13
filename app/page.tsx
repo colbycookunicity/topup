@@ -7,7 +7,9 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  Copy,
   Download,
+  ExternalLink,
   FileSpreadsheet,
   LayoutDashboard,
   LogOut,
@@ -29,9 +31,10 @@ import {
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
 import { createClient } from "@supabase/supabase-js";
 import Image from "next/image";
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type Tab = "overview" | "mine" | "queue" | "leaderboard" | "users" | "imports";
+const TAB_STORAGE_KEY = "topup:last-tab";
 type ContactStatus = "unassigned" | "assigned" | "contacted" | "follow-up" | "complete";
 
 const TAB_IDS: Tab[] = ["overview", "mine", "queue", "leaderboard", "users", "imports"];
@@ -155,6 +158,23 @@ function formatDate(value?: string | null) {
   return new Intl.DateTimeFormat("en", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(date);
 }
 
+function portalUrl(distributorId: string) {
+  return `https://portal.unicity.com/#/customers/${encodeURIComponent(distributorId)}/overview`;
+}
+
+function CopyButton({ value, label, className = "copy-button" }: { value: string; label: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copyValue(event: React.MouseEvent<HTMLButtonElement>) {
+    event.stopPropagation();
+    await navigator.clipboard.writeText(value);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1600);
+  }
+
+  return <button type="button" className={className} onClick={copyValue} aria-label={`Copy ${label}`} title={copied ? "Copied" : `Copy ${label}`}><Copy size={15} />{copied && <span className="copy-feedback">Copied</span>}</button>;
+}
+
 function formatPeriod(value?: string | null) {
   if (!value) return "Current source";
   const date = new Date(`${value.slice(0, 10)}T00:00:00`);
@@ -255,19 +275,23 @@ function getTeamMetrics(people: Person[], teamActivities: Activity[] = []): Team
   const grouped = new Map<string, TeamMetric>();
   people.forEach((person) => {
     if (!person.assigned_name) return;
-    const current = grouped.get(person.assigned_name) ?? { name: person.assigned_name, initials: initials(person.assigned_name), assigned: 0, newDistributors: 0, rank: 0, pcm: 0, notes: 0 };
+    const identityKey = person.assigned_to ? `user:${person.assigned_to}` : `source:${person.assigned_name.trim().toLowerCase()}`;
+    const current = grouped.get(identityKey) ?? { name: person.assigned_name, initials: initials(person.assigned_name), assigned: 0, newDistributors: 0, rank: 0, pcm: 0, notes: 0 };
     current.assigned += 1;
     current.newDistributors += person.is_new_distributor ? 1 : 0;
     current.rank += person.is_rank_opportunity ? 1 : 0;
     current.pcm += person.is_pcm_opportunity ? 1 : 0;
     current.notes += person.source_notes ? 1 : 0;
-    grouped.set(current.name, current);
+    grouped.set(identityKey, current);
   });
   teamActivities.forEach((activity) => {
     if (!activity.notes?.trim()) return;
-    const current = grouped.get(activity.author_name) ?? { name: activity.author_name, initials: initials(activity.author_name), assigned: 0, newDistributors: 0, rank: 0, pcm: 0, notes: 0 };
+    const identityKey = `user:${activity.user_id}`;
+    const current = grouped.get(identityKey) ?? { name: activity.author_name, initials: initials(activity.author_name), assigned: 0, newDistributors: 0, rank: 0, pcm: 0, notes: 0 };
+    current.name = activity.author_name;
+    current.initials = initials(activity.author_name);
     current.notes += 1;
-    grouped.set(current.name, current);
+    grouped.set(identityKey, current);
   });
   return [...grouped.values()].sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name));
 }
@@ -330,6 +354,8 @@ export default function Home() {
   const [profileName, setProfileName] = useState("");
   const [profileOpen, setProfileOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const profileMenuRef = useRef<HTMLDivElement>(null);
+  const [navigationReady, setNavigationReady] = useState(false);
   const [users, setUsers] = useState<UserDirectoryEntry[]>([]);
   const [userSaving, setUserSaving] = useState("");
 
@@ -338,6 +364,7 @@ export default function Home() {
 
   const userEmail = session?.user.email ?? "";
   const userId = session?.user.id ?? "";
+  const sessionTopupRole = session?.user.app_metadata?.topup_role as string | undefined;
   const userName = displayName || ((session?.user.user_metadata?.full_name as string | undefined) ?? userEmail.split("@")[0]?.replace(/[._]/g, " ")) || "Team member";
 
   useEffect(() => {
@@ -364,8 +391,7 @@ export default function Home() {
   }, []);
 
   const loadPeople = useCallback(async () => {
-    if (!supabase || !session) return;
-    setDataReady(false);
+    if (!supabase || !userId) return;
     setDataError("");
     const records: Person[] = [];
     for (let from = 0; ; from += 1000) {
@@ -378,10 +404,10 @@ export default function Home() {
     records.sort((a, b) => Number(Boolean(a.assigned_name)) - Number(Boolean(b.assigned_name)) || (a.gap_to_rank ?? Number.MAX_SAFE_INTEGER) - (b.gap_to_rank ?? Number.MAX_SAFE_INTEGER) || a.name.localeCompare(b.name));
     setPeople(records);
     setDataReady(true);
-  }, [session, supabase]);
+  }, [supabase, userId]);
 
   const loadTeamActivities = useCallback(async () => {
-    if (!supabase || !session) return;
+    if (!supabase || !userId) return;
     const records: Activity[] = [];
     for (let from = 0; ; from += 1000) {
       const { data, error } = await supabase
@@ -407,42 +433,54 @@ export default function Home() {
       if (page.length < 1000) break;
     }
     setTeamActivities(records);
-  }, [notifyError, session, supabase]);
+  }, [notifyError, supabase, userId]);
 
   const loadUsers = useCallback(async () => {
-    if (!supabase || !session) return;
+    if (!supabase || !userId) return;
     const { data: directory, error } = await supabase
       .from("topup_user_directory")
       .select("email,display_name,last_login_at,is_admin")
       .order("display_name");
     if (error) { notifyError(`Users could not be loaded: ${error.message}`); return; }
     setUsers((directory ?? []) as UserDirectoryEntry[]);
-  }, [notifyError, session, supabase]);
+  }, [notifyError, supabase, userId]);
 
   useEffect(() => {
     if (!supabase) return;
     supabase.auth.getSession().then(({ data }) => { setSession(data.session); setAuthReady(true); });
-    const { data } = supabase.auth.onAuthStateChange((_event, next) => setSession(next));
+    const { data } = supabase.auth.onAuthStateChange((event, next) => {
+      setSession((current) => {
+        // Supabase refreshes tokens when a background tab becomes active again.
+        // The client already owns the fresh token, so keep the stable React
+        // identity and avoid rerunning the full dashboard bootstrap.
+        if (event === "TOKEN_REFRESHED" && current?.user.id === next?.user.id) return current;
+        return next;
+      });
+      setAuthReady(true);
+    });
     return () => data.subscription.unsubscribe();
   }, [supabase]);
 
   useEffect(() => {
-    if (!supabase || !session) return;
+    if (!supabase || !userId || !userEmail) return;
     let active = true;
     async function bootstrap() {
-      const sessionEmail = session?.user.email ?? "";
+      const sessionEmail = userEmail;
       const { data: directoryEntry } = await supabase?.from("topup_user_directory").select("display_name").eq("email", sessionEmail.toLowerCase()).maybeSingle() ?? { data: null };
-      const { data: currentProfile } = await supabase?.from("profiles").select("full_name").eq("id", session.user.id).maybeSingle() ?? { data: null };
+      const { data: currentProfile } = await supabase?.from("profiles").select("full_name").eq("id", userId).maybeSingle() ?? { data: null };
       const currentName = directoryEntry?.display_name?.trim() || currentProfile?.full_name?.trim() || "";
       if (active) { setDisplayName(currentName); setProfileName(currentName); }
       const { data: adminRow } = await supabase?.from("topup_admins").select("email").eq("email", sessionEmail.toLowerCase()).maybeSingle() ?? { data: null };
-      const admin = Boolean(adminRow) || session?.user.app_metadata?.topup_role === "admin";
+      const admin = Boolean(adminRow) || sessionTopupRole === "admin";
       if (active) {
         setIsAdmin(admin);
         const fromHash = parseHash(window.location.hash);
         const allowed = fromHash && (admin || !ADMIN_TABS.includes(fromHash.tab)) ? fromHash : null;
-        setTab(allowed ? allowed.tab : admin ? "overview" : "mine");
+        const savedTab = window.localStorage.getItem(`${TAB_STORAGE_KEY}:${sessionEmail.toLowerCase()}`) as Tab | null;
+        const savedAllowed = savedTab && TAB_IDS.includes(savedTab) && (admin || !ADMIN_TABS.includes(savedTab));
+        setTab(allowed ? allowed.tab : savedAllowed ? savedTab : admin ? "overview" : "mine");
         if (allowed && allowed.filter !== "all") setQueueFilter(allowed.filter);
+        setNavigationReady(true);
       }
       await loadPeople();
       await loadTeamActivities();
@@ -454,7 +492,35 @@ export default function Home() {
     }
     bootstrap();
     return () => { active = false; };
-  }, [loadPeople, loadTeamActivities, loadUsers, session, supabase]);
+  }, [loadPeople, loadTeamActivities, loadUsers, sessionTopupRole, supabase, userEmail, userId]);
+
+  useEffect(() => {
+    if (!session || !userEmail || !navigationReady) return;
+    window.localStorage.setItem(`${TAB_STORAGE_KEY}:${userEmail.toLowerCase()}`, tab);
+  }, [navigationReady, session, tab, userEmail]);
+
+  useEffect(() => {
+    if (!profileOpen) return;
+    function dismissProfile(event: MouseEvent) {
+      if (!profileMenuRef.current?.contains(event.target as Node)) setProfileOpen(false);
+    }
+    function dismissProfileWithKeyboard(event: KeyboardEvent) {
+      if (event.key === "Escape") setProfileOpen(false);
+    }
+    document.addEventListener("mousedown", dismissProfile);
+    document.addEventListener("keydown", dismissProfileWithKeyboard);
+    return () => {
+      document.removeEventListener("mousedown", dismissProfile);
+      document.removeEventListener("keydown", dismissProfileWithKeyboard);
+    };
+  }, [profileOpen]);
+
+  function syncVisibleName(profileId: string, nextName: string) {
+    setPeople((items) => items.map((item) => item.assigned_to === profileId ? { ...item, assigned_name: nextName } : item));
+    setSelected((person) => person?.assigned_to === profileId ? { ...person, assigned_name: nextName } : person);
+    setActivities((items) => items.map((activity) => activity.user_id === profileId ? { ...activity, author_name: nextName } : activity));
+    setTeamActivities((items) => items.map((activity) => activity.user_id === profileId ? { ...activity, author_name: nextName } : activity));
+  }
 
   async function saveUserName(entry: UserDirectoryEntry, nextName: string) {
     if (!supabase || !isAdmin) return;
@@ -465,8 +531,10 @@ export default function Home() {
     if (!error) await supabase.from("profiles").update({ full_name: normalized }).eq("email", entry.email);
     setUserSaving("");
     if (error) { notifyError(error.message); return; }
+    const { data: profile } = await supabase.from("profiles").select("id").eq("email", entry.email).maybeSingle();
     setUsers((items) => items.map((item) => item.email === entry.email ? { ...item, display_name: normalized } : item));
     if (entry.email === userEmail.toLowerCase()) setDisplayName(normalized);
+    if (profile?.id) syncVisibleName(profile.id, normalized);
     notify(`${normalized}'s name was updated.`);
   }
 
@@ -481,6 +549,7 @@ export default function Home() {
     setProfileSaving(false);
     if (error) { notifyError(error.message); return; }
     setDisplayName(nextName);
+    syncVisibleName(session.user.id, nextName);
     setUsers((items) => items.map((item) => item.email === userEmail.toLowerCase() ? { ...item, display_name: nextName } : item));
     setProfileOpen(false);
     notify(`Your profile name is now ${nextName}.`);
@@ -612,7 +681,7 @@ export default function Home() {
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
-    setSession(null); setSelected(null); setPeople([]); setUsers([]); setDisplayName(""); setProfileName(""); setProfileOpen(false); setIsAdmin(false);
+    setSession(null); setSelected(null); setPeople([]); setUsers([]); setDisplayName(""); setProfileName(""); setProfileOpen(false); setIsAdmin(false); setNavigationReady(false);
   }
 
   async function claim(person: Person) {
@@ -863,7 +932,7 @@ export default function Home() {
   const sourcePeriod = formatPeriod(people.find((person) => person.source_period)?.source_period);
 
   return <div className="app-shell">
-    <header className="topbar"><div className="topbar-left"><Image className="unicity-logo topbar-logo" src="/unicity-corp-logo-light.webp" alt="Unicity" width={1834} height={341} priority unoptimized /><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu-wrap"><button className="profile-menu" type="button" aria-expanded={profileOpen} aria-haspopup="dialog" onClick={() => { setProfileName(displayName || userName); setProfileOpen((open) => !open); }}><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></button>{profileOpen && <form className="profile-dropdown" onSubmit={saveProfileName}><div><strong>Your profile</strong><span>{userEmail}</span></div><label htmlFor="profile-name">Display name</label><input id="profile-name" value={profileName} onChange={(event) => setProfileName(event.target.value)} maxLength={80} autoComplete="name" autoFocus /><p>Capitalization is preserved exactly as entered.</p><button className="primary-button full" disabled={profileSaving || !profileName.trim() || profileName.trim() === displayName}>{profileSaving ? "Saving…" : "Save name"}</button></form>}</div></div></header>
+    <header className="topbar"><div className="topbar-left"><Image className="unicity-logo topbar-logo" src="/unicity-corp-logo-light.webp" alt="Unicity" width={1834} height={341} priority unoptimized /><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu-wrap" ref={profileMenuRef}><button className="profile-menu" type="button" aria-expanded={profileOpen} aria-haspopup="dialog" onClick={() => { setProfileName(displayName || userName); setProfileOpen((open) => !open); }}><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></button>{profileOpen && <form className="profile-dropdown" onSubmit={saveProfileName}><div><strong>Your profile</strong><span>{userEmail}</span></div><label htmlFor="profile-name">Display name</label><input id="profile-name" value={profileName} onChange={(event) => setProfileName(event.target.value)} maxLength={80} autoComplete="name" autoFocus /><p>Capitalization is preserved exactly as entered.</p><button className="primary-button full" disabled={profileSaving || !profileName.trim() || profileName.trim() === displayName}>{profileSaving ? "Saving…" : "Save name"}</button></form>}</div></div></header>
     <div className="workspace"><aside className="sidebar"><nav>{isAdmin && <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><LayoutDashboard size={19} /> Overview</button>}<button className={tab === "mine" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("mine"); }}><UserRoundCheck size={19} /> My Board <span className="nav-count">{people.filter((person) => person.assigned_to === userId).length}</span></button><button className={tab === "queue" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("queue"); }}><Users size={19} /> {isAdmin ? "Work queue" : "All distributors"} <span className="nav-count">{people.length}</span></button><button className={tab === "leaderboard" ? "active" : ""} onClick={() => setTab("leaderboard")}><Trophy size={19} /> Team coverage</button>{isAdmin && <button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><UserCog size={19} /> Manage users</button>}{isAdmin && <button className={tab === "imports" ? "active" : ""} onClick={() => setTab("imports")}><UploadCloud size={19} /> Imports</button>}</nav><div className="sidebar-bottom"><div className="close-card"><span>{sourcePeriod.toUpperCase()}</span><strong>{isAdmin ? "Source coverage" : "My Board"}</strong><p>{isAdmin ? `${contacted.toLocaleString()} of ${people.length.toLocaleString()} profiles have a recorded contact owner.` : `${people.filter((person) => person.assigned_to === userId).length.toLocaleString()} distributors are currently assigned to you.`}</p>{isAdmin && <><div className="mini-progress"><i style={{ width: `${coverage}%` }} /></div><b>{coverage}% recorded</b></>}</div><button className="signout" onClick={signOut}><LogOut size={18} /> Sign out</button></div></aside>
       <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>{tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}{tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "queue" && <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}{tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} onSave={saveUserName} />}{tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}</>}</main>
     </div>
@@ -923,7 +992,7 @@ function PersonRow({ person, onOpen }: { person: Person; onOpen: (person: Person
   const touchTitle = person.last_contacted_at ? formatDate(person.last_contacted_at) : person.source_contacted_by ? "Source workbook" : "No contact recorded";
   const dueDays = isFollowUpDue(person) ? daysSince(person.last_contacted_at) : null;
   const touchDetail = dueDays != null ? `Follow-up due · ${dueDays} days since contact` : person.last_outcome ?? person.source_notes ?? (person.source_contacted_by ? "Contact owner recorded" : "No activity yet");
-  return <button className="queue-row" onClick={() => onOpen(person)}><span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small>#{person.external_id}</small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small>{pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></button>;
+  return <div className="queue-row" role="button" tabIndex={0} onClick={() => onOpen(person)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(person); } }}><span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} aria-label={`Open UID ${person.external_id} in Unicity Portal`}>UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small>{pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></div>;
 }
 
 function Status({ status }: { status: ContactStatus }) {
@@ -973,8 +1042,8 @@ function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activitie
   return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
     <aside className="drawer">
       <div className="drawer-header"><div><span className="eyebrow">DISTRIBUTOR PROFILE</span><h2>{person.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile"><X size={20} /></button></div>
-      <div className="profile-summary"><div className="avatar profile-avatar">{initials(person.name)}</div><div><strong>{person.name}</strong><span>#{person.external_id} · {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""} · Joined {person.joined_at ? new Date(`${person.joined_at}T00:00:00`).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" }) : "not provided"}</span><div className="profile-tags">{person.is_new_distributor && <b>New distributor</b>}{person.is_rank_opportunity && <b>Rank push</b>}{person.is_pcm_opportunity && <b>PCM pathway</b>}{person.has_ten_pack && <b>10 Pack</b>}{person.first_time_at_rank === true && <b>First time at rank</b>}</div></div></div>
-      <div className="contact-actions">{person.phone ? <a href={`tel:${person.phone}`}><Phone size={17} /> Call</a> : <span aria-disabled="true"><Phone size={17} /> No phone</span>}{person.email ? <a href={`mailto:${person.email}`}><Mail size={17} /> Email</a> : <span aria-disabled="true"><Mail size={17} /> No email</span>}{person.phone ? <a href={`https://wa.me/${person.phone.replace(/\D/g, "")}`}><MessageCircle size={17} /> WhatsApp</a> : <span aria-disabled="true"><MessageCircle size={17} /> No WhatsApp</span>}</div>
+      <div className="profile-summary"><div className="avatar profile-avatar">{initials(person.name)}</div><div><strong>{person.name}</strong><span className="profile-meta"><span className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer">UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></span><span>· {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""} · Joined {person.joined_at ? new Date(`${person.joined_at}T00:00:00`).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" }) : "not provided"}</span></span>{person.email && <span className="profile-email"><Mail size={14} aria-hidden="true" /><span>{person.email}</span><CopyButton value={person.email} label={`${person.email} email`} /></span>}<div className="profile-tags">{person.is_new_distributor && <b>New distributor</b>}{person.is_rank_opportunity && <b>Rank push</b>}{person.is_pcm_opportunity && <b>PCM pathway</b>}{person.has_ten_pack && <b>10 Pack</b>}{person.first_time_at_rank === true && <b>First time at rank</b>}</div></div></div>
+      <div className="contact-actions">{person.phone ? <a href={`tel:${person.phone}`}><Phone size={17} /> Call</a> : <span aria-disabled="true"><Phone size={17} /> No phone</span>}{person.email ? <a href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer"><Mail size={17} /> Email</a> : <span aria-disabled="true"><Mail size={17} /> No email</span>}{person.phone ? <a href={`https://wa.me/${person.phone.replace(/\D/g, "")}`} target="_blank" rel="noopener noreferrer"><MessageCircle size={17} /> WhatsApp</a> : <span aria-disabled="true"><MessageCircle size={17} /> No WhatsApp</span>}</div>
       <section className="profile-section"><h3>Opportunity</h3><div className="rank-path"><div><span>CURRENT RANK</span><strong>{person.current_rank ?? "Not provided"}</strong></div><ArrowRight size={18} /><div><span>RUNNING FOR</span><strong>{person.target_rank ?? "Not provided"}</strong></div></div><div className="volume-card"><div><span>Total OV needed</span><strong>{person.gap_to_rank == null ? "Not provided" : person.gap_to_rank.toLocaleString()}</strong></div><div><span>Highest rank</span><strong>{person.highest_rank_name ?? "Not provided"}</strong></div></div>{person.nearest_leader_name && (leader ? <button type="button" className="leader-card" onClick={() => onOpenLeader(leader)}><span className="avatar tiny-avatar">{initials(leader.name)}</span><span className="leader-info"><strong>{leader.name}</strong><small>Nearest leader · {leader.assigned_name ? `Working with ${leader.assigned_name}` : "Available to claim"}</small></span><Status status={leader.status} /><ChevronRight size={17} /></button> : <div className="source-detail"><span>Nearest leader</span><strong>{person.nearest_leader_name}</strong></div>)}</section>
       <section className="profile-section"><h3>Ownership</h3>{person.assigned_name ? <div className="owner-card"><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><div><strong>{person.assigned_name}</strong><span>{person.assigned_to ? "Linked Top Up owner" : "Owner recorded in source workbook"}</span></div><Status status={person.status} /></div> : <div className="unclaimed-card"><Users size={20} /><div><strong>This profile is available</strong><span>Claim it to add it to your personal queue.</span></div></div>}{isAdmin && users.length > 0 && <select className="filter-select assign-select" aria-label={`Assign ${person.name} to a team member`} value="" onChange={(event) => { const value = event.target.value; if (value === "__unassign__") onAssign(null); else { const entry = users.find((user) => user.email === value); if (entry) onAssign(entry); } }}><option value="" disabled>Assign to team member…</option>{person.assigned_name && <option value="__unassign__">Unassign — make available</option>}{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}{user.display_name === person.assigned_name ? " (current)" : ""}</option>)}</select>}</section>
       <section className="profile-section"><h3>Activity history</h3><div className="timeline-list">{activitiesLoading ? <div className="no-activity"><Clock3 size={20} /> Loading preserved notes…</div> : activities.map((activity) => <div className="timeline" key={activity.id}><i /><div><strong>{activity.outcome}</strong><span>{formatDate(activity.created_at)} · {activity.author_name} · {activity.activity_type}</span>{activity.notes && <p>{activity.notes}</p>}</div></div>)}{person.source_notes || person.source_contacted_by ? <div className="timeline source-timeline"><i /><div><strong>Imported source record</strong><span>{person.source_contacted_by ? `Contacted By: ${person.source_contacted_by}` : "No Contacted By value"}</span>{person.source_notes && <p>{person.source_notes}</p>}</div></div> : null}{!activitiesLoading && !activities.length && !person.source_notes && !person.source_contacted_by && <div className="no-activity"><Clock3 size={20} /> No outreach is recorded yet.</div>}</div></section>

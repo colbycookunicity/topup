@@ -150,6 +150,20 @@ test("supports named users and protected admin user management", async () => {
   assert.match(migration, /admins can update user display names/);
 });
 
+test("links distributor UIDs to Portal and keeps email copy beside the visible address", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /portal\.unicity\.com\/#\/customers\/\$\{encodeURIComponent\(distributorId\)\}\/overview/);
+  assert.match(page, /target="_blank" rel="noopener noreferrer"/);
+  assert.match(page, /UID: \{person\.external_id\}/);
+  assert.match(page, /navigator\.clipboard\.writeText\(value\)/);
+  assert.match(page, /label=\{`UID \$\{person\.external_id\}`\}/);
+  assert.match(page, /label=\{`\$\{person\.email\} email`\}/);
+  assert.match(page, /className="profile-email"/);
+  assert.match(page, /https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox/);
+  assert.doesNotMatch(page, /mailto:/);
+  assert.doesNotMatch(page, /contact-copy-button/);
+});
+
 test("allows users to edit their own case-preserved display name", async () => {
   const [page, migration, boardMigration] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
@@ -159,8 +173,20 @@ test("allows users to edit their own case-preserved display name", async () => {
   assert.match(page, /Your profile/);
   assert.match(page, /Capitalization is preserved exactly as entered/);
   assert.match(page, /profileName\.trim\(\)/);
+  assert.match(page, /profileMenuRef\.current\?\.contains/);
+  assert.match(page, /syncVisibleName\(session\.user\.id, nextName\)/);
+  assert.match(page, /localStorage\.getItem\(`\$\{TAB_STORAGE_KEY\}:\$\{sessionEmail\.toLowerCase\(\)\}`\)/);
+  assert.match(page, /person\.assigned_to \? `user:\$\{person\.assigned_to\}`/);
+  assert.match(page, /const identityKey = `user:\$\{activity\.user_id\}`/);
   assert.match(migration, /employees can update their own display name/);
   assert.match(migration, /update public\.profiles[\s\S]*set full_name = new\.display_name/);
   assert.match(boardMigration, /update public\.distributors[\s\S]*set assigned_name = new\.display_name/);
   assert.match(migration, /revoke all on function private\.sync_topup_directory_display_name\(\) from public, anon, authenticated/);
+});
+
+test("keeps the current board visible during background auth refreshes", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /event === "TOKEN_REFRESHED"/);
+  assert.match(page, /current\?\.user\.id === next\?\.user\.id/);
+  assert.doesNotMatch(page, /const loadPeople[\s\S]*?setDataReady\(false\)/);
 });
