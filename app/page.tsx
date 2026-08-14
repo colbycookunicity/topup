@@ -61,6 +61,7 @@ type Person = {
   gap_to_rank?: number | null;
   status: ContactStatus;
   assigned_to?: string | null;
+  assigned_email?: string | null;
   assigned_name?: string | null;
   source_contacted_by?: string | null;
   is_new_distributor: boolean;
@@ -315,6 +316,10 @@ function ownerMatchesUser(owner: string | null | undefined, userName: string) {
   return userName.toLowerCase().split(/[\s._]+/).includes(ownerToken);
 }
 
+function personBelongsToUser(person: Person, userId: string, userEmail: string) {
+  return person.assigned_to === userId || Boolean(userEmail && person.assigned_email === userEmail.toLowerCase());
+}
+
 function nameKeys(name: string) {
   const normalized = name.trim().replace(/\s+/g, " ").toLowerCase();
   const keys = new Set([normalized]);
@@ -373,6 +378,8 @@ export default function Home() {
   const [userSaving, setUserSaving] = useState("");
   const [adminEmails, setAdminEmails] = useState<string[]>([]);
   const [adminSaving, setAdminSaving] = useState(false);
+  const [selectedQueueIds, setSelectedQueueIds] = useState<string[]>([]);
+  const [bulkAssignBusy, setBulkAssignBusy] = useState(false);
 
   const notify = useCallback((text: string) => setToast({ text, tone: "success" }), []);
   const notifyError = useCallback((text: string) => setToast({ text, tone: "error" }), []);
@@ -625,9 +632,9 @@ export default function Home() {
   }, [authStep, resendCountdown]);
 
   const queuePool = useMemo(() => {
-    if (tab === "mine") return people.filter((person) => person.assigned_to === userId);
+    if (tab === "mine") return people.filter((person) => personBelongsToUser(person, userId, userEmail));
     return people;
-  }, [people, tab, userId]);
+  }, [people, tab, userEmail, userId]);
 
   const selectedLeader = useMemo(() => {
     if (!selected?.nearest_leader_name) return null;
@@ -638,8 +645,8 @@ export default function Home() {
   const filteredPeople = useMemo(() => {
     const result = queuePool.filter((person) => {
       const statusMatch = queueFilter === "all"
-        || (queueFilter === "mine" ? person.assigned_to === userId
-          : queueFilter === "available" ? !person.assigned_to && !person.assigned_name
+        || (queueFilter === "mine" ? personBelongsToUser(person, userId, userEmail)
+          : queueFilter === "available" ? !person.assigned_to && !person.assigned_email && !person.assigned_name
           : queueFilter === "due" ? isFollowUpDue(person)
           : queueFilter === "rank" ? person.is_rank_opportunity
             : queueFilter === "pcm" ? person.is_pcm_opportunity
@@ -651,7 +658,7 @@ export default function Home() {
     });
     if (queueFilter === "due") result.sort((a, b) => new Date(a.last_contacted_at ?? 0).getTime() - new Date(b.last_contacted_at ?? 0).getTime());
     return result;
-  }, [countryFilter, queueFilter, query, queuePool, stateFilter, userId]);
+  }, [countryFilter, queueFilter, query, queuePool, stateFilter, userEmail, userId]);
 
   async function requestOtp(event: FormEvent) {
     event.preventDefault();
@@ -723,15 +730,16 @@ export default function Home() {
     if (!supabase || !session) return;
     const { data, error } = await supabase
       .from("distributors")
-      .update({ assigned_to: session.user.id, assigned_name: userName, status: "assigned" })
+      .update({ assigned_to: session.user.id, assigned_email: userEmail.toLowerCase(), assigned_name: userName, status: "assigned" })
       .eq("id", person.id)
       .is("assigned_to", null)
+      .is("assigned_email", null)
       .is("assigned_name", null)
       .select("id")
       .maybeSingle();
     if (error) { notifyError(error.message); return; }
     if (!data) { notifyError("This distributor was already claimed by another team member."); await loadPeople(); return; }
-    const next = { ...person, assigned_to: session.user.id, assigned_name: userName, status: "assigned" as ContactStatus };
+    const next = { ...person, assigned_to: session.user.id, assigned_email: userEmail.toLowerCase(), assigned_name: userName, status: "assigned" as ContactStatus };
     setPeople((items) => items.map((item) => item.id === person.id ? next : item));
     setSelected(next); notify(`${person.name} is now linked to your queue.`);
   }
@@ -741,9 +749,9 @@ export default function Home() {
     if (!entry) {
       const confirmed = window.confirm(`Unassign ${person.name} and return them to the available queue? Notes and history are preserved.`);
       if (!confirmed) return;
-      const { error } = await supabase.from("distributors").update({ assigned_to: null, assigned_name: null, status: "unassigned" }).eq("id", person.id);
+      const { error } = await supabase.from("distributors").update({ assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" }).eq("id", person.id);
       if (error) { notifyError(error.message); return; }
-      const next = { ...person, assigned_to: null, assigned_name: null, status: "unassigned" as ContactStatus };
+      const next = { ...person, assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" as ContactStatus };
       setPeople((items) => items.map((item) => item.id === person.id ? next : item));
       setSelected(next);
       notify(`${person.name} is available again.`);
@@ -755,13 +763,33 @@ export default function Home() {
     }
     const { data: profile, error: profileError } = await supabase.from("profiles").select("id").eq("email", entry.email).maybeSingle();
     if (profileError) { notifyError(profileError.message); return; }
-    if (!profile) { notifyError(`${entry.display_name} must sign in to Top Up once before receiving assignments.`); return; }
-    const { error } = await supabase.from("distributors").update({ assigned_to: profile.id, assigned_name: entry.display_name, status: "assigned" }).eq("id", person.id);
+    const { error } = await supabase.from("distributors").update({ assigned_to: profile?.id ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" }).eq("id", person.id);
     if (error) { notifyError(error.message); return; }
-    const next = { ...person, assigned_to: profile.id as string, assigned_name: entry.display_name, status: "assigned" as ContactStatus };
+    const next = { ...person, assigned_to: (profile?.id as string | undefined) ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" as ContactStatus };
     setPeople((items) => items.map((item) => item.id === person.id ? next : item));
     setSelected(next);
     notify(`${person.name} is now assigned to ${entry.display_name}.`);
+  }
+
+  async function bulkAssign(entry: UserDirectoryEntry) {
+    if (!supabase || !session || !isAdmin || !selectedQueueIds.length) return;
+    setBulkAssignBusy(true);
+    const { data: profile, error: profileError } = await supabase.from("profiles").select("id").eq("email", entry.email).maybeSingle();
+    if (profileError) { setBulkAssignBusy(false); notifyError(profileError.message); return; }
+    const { data, error } = await supabase
+      .from("distributors")
+      .update({ assigned_to: profile?.id ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" })
+      .in("id", selectedQueueIds)
+      .is("assigned_to", null)
+      .is("assigned_email", null)
+      .is("assigned_name", null)
+      .select("id");
+    setBulkAssignBusy(false);
+    if (error) { notifyError(`Selected distributors could not be assigned: ${error.message}`); return; }
+    const updatedIds = new Set((data ?? []).map((item) => item.id as string));
+    setPeople((items) => items.map((item) => updatedIds.has(item.id) ? { ...item, assigned_to: profile?.id ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" as ContactStatus } : item));
+    setSelectedQueueIds([]);
+    notify(`${updatedIds.size} distributor${updatedIds.size === 1 ? "" : "s"} assigned to ${entry.display_name}.`);
   }
 
   async function openPerson(person: Person) {
@@ -796,21 +824,21 @@ export default function Home() {
   }
 
   async function release(person: Person) {
-    if (!supabase || !session || person.assigned_to !== session.user.id) return;
+    if (!supabase || !session || !personBelongsToUser(person, session.user.id, userEmail)) return;
     const confirmed = window.confirm(`Release ${person.name} back to the available queue? All activity notes and history will be preserved.`);
     if (!confirmed) return;
     setReleaseBusy(true);
     const { data, error } = await supabase
       .from("distributors")
-      .update({ assigned_to: null, assigned_name: null, status: "unassigned" })
+      .update({ assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" })
       .eq("id", person.id)
-      .eq("assigned_to", session.user.id)
+      .or(`assigned_to.eq.${session.user.id},assigned_email.eq.${userEmail.toLowerCase()}`)
       .select("id")
       .maybeSingle();
     setReleaseBusy(false);
     if (error) { notifyError(error.message); return; }
     if (!data) { notifyError("This distributor is no longer assigned to you."); await loadPeople(); return; }
-    const next = { ...person, assigned_to: null, assigned_name: null, status: "unassigned" as ContactStatus };
+    const next = { ...person, assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" as ContactStatus };
     setPeople((items) => items.map((item) => item.id === person.id ? next : item));
     setSelected(next);
     notify(`${person.name} was released. Their notes and activity history were preserved.`);
@@ -884,6 +912,7 @@ export default function Home() {
           gap_to_rank: nullableNumber(row.total_ov_needed || row.gap_to_rank || row.volume_needed) ?? previous?.gap_to_rank ?? null,
           status: previous?.status && previous.status !== "unassigned" ? previous.status : owner ? "contacted" : "unassigned",
           assigned_to: previous?.assigned_to ?? null,
+          assigned_email: previous?.assigned_email ?? null,
           assigned_name: previous?.assigned_name ?? owner,
           source_contacted_by: owner ?? previous?.source_contacted_by ?? null,
           is_new_distributor: Boolean(previous?.is_new_distributor || isNew),
@@ -969,7 +998,17 @@ export default function Home() {
   return <div className="app-shell">
     <header className="topbar"><div className="topbar-left"><Image className="unicity-logo topbar-logo" src="/unicity-corp-logo-light.webp" alt="Unicity" width={1834} height={341} priority unoptimized /><div className="topup-divider" /><div className="topup-title">TOP UP <span>AMERICAS</span></div></div><div className="topbar-right"><div className="month-pill"><span className="live-dot" /> {sourcePeriod.toUpperCase()} · {people.length.toLocaleString()} PROFILES</div><div className="profile-menu-wrap" ref={profileMenuRef}><button className="profile-menu" type="button" aria-expanded={profileOpen} aria-haspopup="dialog" onClick={() => { setProfileName(displayName || userName); setProfileOpen((open) => !open); }}><div className="avatar">{initials(userName)}</div><div><strong>{userName}</strong><span>{isAdmin ? "Administrator" : "Sales manager"}</span></div><ChevronDown size={15} /></button>{profileOpen && <form className="profile-dropdown" onSubmit={saveProfileName}><div><strong>Your profile</strong><span>{userEmail}</span></div><label htmlFor="profile-name">Display name</label><input id="profile-name" value={profileName} onChange={(event) => setProfileName(event.target.value)} maxLength={80} autoComplete="name" autoFocus /><p>Capitalization is preserved exactly as entered.</p><button className="primary-button full" disabled={profileSaving || !profileName.trim() || profileName.trim() === displayName}>{profileSaving ? "Saving…" : "Save name"}</button></form>}</div></div></header>
     <div className="workspace"><aside className="sidebar"><nav>{isAdmin && <button className={tab === "overview" ? "active" : ""} onClick={() => setTab("overview")}><LayoutDashboard size={19} /> Overview</button>}<button className={tab === "mine" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("mine"); }}><UserRoundCheck size={19} /> My Board <span className="nav-count">{people.filter((person) => person.assigned_to === userId).length}</span></button><button className={tab === "queue" ? "active" : ""} onClick={() => { setQueueFilter("all"); setTab("queue"); }}><Users size={19} /> {isAdmin ? "Work queue" : "All distributors"} <span className="nav-count">{people.length}</span></button><button className={tab === "leaderboard" ? "active" : ""} onClick={() => setTab("leaderboard")}><Trophy size={19} /> Team coverage</button>{isAdmin && <button className={tab === "users" ? "active" : ""} onClick={() => setTab("users")}><UserCog size={19} /> Manage users</button>}{isAdmin && <button className={tab === "imports" ? "active" : ""} onClick={() => setTab("imports")}><UploadCloud size={19} /> Imports</button>}</nav><div className="sidebar-bottom"><div className="close-card"><span>{sourcePeriod.toUpperCase()}</span><strong>{isAdmin ? "Source coverage" : "My Board"}</strong><p>{isAdmin ? `${contacted.toLocaleString()} of ${people.length.toLocaleString()} profiles have a recorded contact owner.` : `${people.filter((person) => person.assigned_to === userId).length.toLocaleString()} distributors are currently assigned to you.`}</p>{isAdmin && <><div className="mini-progress"><i style={{ width: `${coverage}%` }} /></div><b>{coverage}% recorded</b></>}</div><button className="signout" onClick={signOut}><LogOut size={18} /> Sign out</button></div></aside>
-      <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>{tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}{tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "queue" && <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}{tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}{tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} adminEmails={adminEmails} adminSaving={adminSaving} onSave={saveUserName} onAddAdmin={addAdministrator} />}{tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}</>}</main>
+      <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>
+        {tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}
+        {tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}
+        {tab === "queue" && <>
+          {isAdmin && <BulkAssignTool people={filteredPeople} users={users} selectedIds={selectedQueueIds} setSelectedIds={setSelectedQueueIds} busy={bulkAssignBusy} onAssign={bulkAssign} />}
+          <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />
+        </>}
+        {tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}
+        {tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} adminEmails={adminEmails} adminSaving={adminSaving} onSave={saveUserName} onAddAdmin={addAdministrator} />}
+        {tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}
+      </>}</main>
     </div>
     {selected && <PersonDrawer key={selected.id} person={selected} leader={selectedLeader} currentUserId={userId} isAdmin={isAdmin} users={users} activities={activities} activitiesLoading={activitiesLoading} releaseBusy={releaseBusy} onClose={() => setSelected(null)} onClaim={() => claim(selected)} onLog={() => setActivityOpen(true)} onRelease={() => release(selected)} onOpenLeader={openPerson} onAssign={(entry) => adminAssign(selected, entry)} />}
     {activityOpen && selected && <ActivityModal person={selected} type={activityType} setType={setActivityType} outcome={activityOutcome} setOutcome={setActivityOutcome} note={activityNote} setNote={setActivityNote} onClose={() => setActivityOpen(false)} onSave={saveActivity} />}
@@ -1002,6 +1041,43 @@ function Overview({ people, userName, sourcePeriod, onOpen, onNavigate, onOpenQu
 
 function Stat({ icon, tone, label, value, detail, onClick }: { icon: React.ReactNode; tone: string; label: string; value: string; detail: string; onClick: () => void }) {
   return <button type="button" className="stat-card" onClick={onClick}><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-top"><span>{label}</span><ChevronRight size={17} /></div><strong>{value}</strong><p>{detail}</p></button>;
+}
+
+function BulkAssignTool({ people, users, selectedIds, setSelectedIds, busy, onAssign }: { people: Person[]; users: UserDirectoryEntry[]; selectedIds: string[]; setSelectedIds: (ids: string[]) => void; busy: boolean; onAssign: (entry: UserDirectoryEntry) => void }) {
+  const [open, setOpen] = useState(false);
+  const [agentEmail, setAgentEmail] = useState("");
+  const available = people.filter((person) => !person.assigned_to && !person.assigned_email && !person.assigned_name);
+  const availableIds = available.map((person) => person.id);
+  const selectedSet = new Set(selectedIds);
+  const selectedAgent = users.find((user) => user.email === agentEmail);
+  const allVisibleSelected = availableIds.length > 0 && availableIds.every((id) => selectedSet.has(id));
+
+  function toggle(id: string) {
+    setSelectedIds(selectedSet.has(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]);
+  }
+
+  function toggleAll() {
+    if (allVisibleSelected) setSelectedIds(selectedIds.filter((id) => !availableIds.includes(id)));
+    else setSelectedIds([...new Set([...selectedIds, ...availableIds])]);
+  }
+
+  return <section className={`panel bulk-assign-tool ${open ? "open" : ""}`}>
+    <div className="bulk-assign-heading">
+      <div><span className="eyebrow">ADMIN ASSIGNMENT TOOL</span><h3>Assign multiple distributors</h3><p>Select unassigned profiles from the current filtered view, then send them to one agent.</p></div>
+      <button type="button" className="secondary-button" onClick={() => setOpen((value) => !value)}><UserRoundCheck size={17} /> {open ? "Close tool" : "Bulk assign"}</button>
+    </div>
+    {open && <div className="bulk-assign-body">
+      <div className="bulk-assign-controls">
+        <label className="bulk-check-all"><input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} disabled={!available.length} /> Select all {available.length.toLocaleString()} visible unassigned</label>
+        <div className="bulk-agent-control"><select className="filter-select" aria-label="Assign selected distributors to agent" value={agentEmail} onChange={(event) => setAgentEmail(event.target.value)}><option value="">Choose an agent…</option>{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}</option>)}</select><button type="button" className="primary-button" disabled={busy || !selectedIds.length || !selectedAgent} onClick={() => selectedAgent && onAssign(selectedAgent)}>{busy ? "Assigning…" : `Assign ${selectedIds.length || ""}`.trim()}</button><button type="button" className="text-button" disabled={!selectedIds.length || busy} onClick={() => setSelectedIds([])}>Clear</button></div>
+      </div>
+      <div className="bulk-selection-summary" aria-live="polite"><strong>{selectedIds.length.toLocaleString()}</strong> selected · <span>{available.length.toLocaleString()} unassigned in this view</span></div>
+      <div className="bulk-distributor-list">
+        {available.map((person) => <label className={selectedSet.has(person.id) ? "selected" : ""} key={person.id}><input type="checkbox" checked={selectedSet.has(person.id)} onChange={() => toggle(person.id)} /><span className="avatar tiny-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small>UID {person.external_id} · {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""}</small></span></label>)}
+        {!available.length && <div className="empty-inline">No unassigned distributors match the current filters.</div>}
+      </div>
+    </div>}
+  </section>;
 }
 
 function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, onOpen, onExport }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; onOpen: (person: Person) => void; onExport: () => void }) {

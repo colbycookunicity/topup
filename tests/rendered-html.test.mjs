@@ -117,7 +117,7 @@ test("supports personal boards, shared activity, and location filters", async ()
 
   assert.match(page, /My Board/);
   assert.match(page, /Only distributors you have claimed and are actively working with/);
-  assert.match(page, /assigned_to: null, assigned_name: null, status: "unassigned"/);
+  assert.match(page, /assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned"/);
   assert.doesNotMatch(page, /update\(\{[^}]*notes:\s*null[^}]*\}\)/);
   assert.match(page, /All activity notes and history will be preserved/);
   assert.match(page, /Activity history/);
@@ -248,4 +248,19 @@ test("links source-assigned distributors to personal boards", async () => {
   assert.match(migration, /update public\.distributors distributors/);
   assert.match(migration, /where distributors\.assigned_to is null/);
   assert.match(migration, /count\(\*\).*topup_user_directory peers/s);
+});
+
+test("supports pre-login ownership and bulk admin assignment", async () => {
+  const [page, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260814211500_add_email_ownership_and_bulk_assignment.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /assigned_email\?: string \| null/);
+  assert.match(page, /function BulkAssignTool/);
+  assert.match(page, /Select all \{available\.length\.toLocaleString\(\)\} visible unassigned/);
+  assert.match(page, /\.in\("id", selectedQueueIds\)/);
+  assert.match(page, /assigned_email: entry\.email/);
+  assert.match(migration, /add column if not exists assigned_email text/);
+  assert.match(migration, /assigned_email = lower\(coalesce\(\(select auth\.jwt\(\)\) ->> 'email'/);
+  assert.match(migration, /unique_directory_names/);
 });
