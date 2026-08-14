@@ -239,3 +239,13 @@ test("animates the distributor drawer in and out accessibly", async () => {
   assert.doesNotMatch(styles, /drawer-panel-in \{[^}]*opacity/);
   assert.match(styles, /prefers-reduced-motion: reduce/);
 });
+
+test("links source-assigned distributors to personal boards", async () => {
+  const migration = await readFile(new URL("../supabase/migrations/20260814195500_link_source_assignments_to_profiles.sql", import.meta.url), "utf8");
+  assert.match(migration, /link_source_assignments_to_profile/);
+  assert.match(migration, /set assigned_to = new\.id/);
+  assert.match(migration, /after insert or update of email, full_name on public\.profiles/);
+  assert.match(migration, /update public\.distributors distributors/);
+  assert.match(migration, /where distributors\.assigned_to is null/);
+  assert.match(migration, /count\(\*\).*topup_user_directory peers/s);
+});
