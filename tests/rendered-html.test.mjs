@@ -257,8 +257,10 @@ test("supports pre-login ownership and bulk admin assignment", async () => {
   ]);
   assert.match(page, /assigned_email\?: string \| null/);
   assert.doesNotMatch(page, /function BulkAssignTool/);
-  assert.match(page, /Select all visible unassigned distributors/);
+  assert.match(page, /Select all visible distributors/);
   assert.match(page, /Assign selected/);
+  assert.match(page, /Unassign selected/);
+  assert.match(page, /bulkUnassign/);
   assert.match(page, /\.in\("id", selectedQueueIds\)/);
   assert.match(page, /assigned_email: entry\.email/);
   assert.match(migration, /add column if not exists assigned_email text/);
@@ -299,8 +301,16 @@ test("uses standard queue checkboxes for filtered bulk assignment", async () => 
 
   assert.doesNotMatch(page, /ADMIN ASSIGNMENT TOOL/);
   assert.match(page, /className="select-cell"/);
-  assert.match(page, /Select all visible unassigned distributors/);
-  assert.match(page, /Choose a team member/);
+  assert.match(page, /Select all visible distributors/);
+  assert.match(page, /Choose assignment/);
   assert.match(styles, /\.queue-selectable \.queue-row \{ grid-template-columns: 34px minmax\(0,1fr\) 18px/);
   assert.match(styles, /\.uid-line \{ max-width: 100%; overflow: hidden !important; \}/);
+});
+
+test("lets admins open an employee queue from team coverage", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /onOpenBoard\(member\.name\)/);
+  assert.match(page, /#queue\/owner\/\$\{encodeURIComponent\(ownerQueueName\)\}/);
+  assert.match(page, /Showing <strong>\{ownerScope\}<\/strong>’s queue/);
+  assert.match(page, /View full queue/);
 });

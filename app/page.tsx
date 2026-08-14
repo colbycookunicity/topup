@@ -42,10 +42,10 @@ const TAB_IDS: Tab[] = ["overview", "mine", "queue", "leaderboard", "users", "im
 const ADMIN_TABS: Tab[] = ["overview", "users", "imports"];
 const QUEUE_FILTER_IDS = ["all", "mine", "available", "new", "rank", "pcm", "due"];
 
-function parseHash(hash: string): { tab: Tab; filter: string } | null {
-  const [rawTab, rawFilter = ""] = hash.replace(/^#/, "").split("/");
+function parseHash(hash: string): { tab: Tab; filter: string; owner: string } | null {
+  const [rawTab, rawFilter = "", rawOwner = ""] = hash.replace(/^#/, "").split("/");
   if (!TAB_IDS.includes(rawTab as Tab)) return null;
-  return { tab: rawTab as Tab, filter: QUEUE_FILTER_IDS.includes(rawFilter) ? rawFilter : "all" };
+  return { tab: rawTab as Tab, filter: QUEUE_FILTER_IDS.includes(rawFilter) ? rawFilter : "all", owner: rawFilter === "owner" ? decodeURIComponent(rawOwner) : "" };
 }
 
 type Person = {
@@ -382,6 +382,7 @@ export default function Home() {
   const [selectedQueueIds, setSelectedQueueIds] = useState<string[]>([]);
   const [bulkAssignBusy, setBulkAssignBusy] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [ownerQueueName, setOwnerQueueName] = useState("");
 
   const notify = useCallback((text: string) => setToast({ text, tone: "success" }), []);
   const notifyError = useCallback((text: string) => setToast({ text, tone: "error" }), []);
@@ -507,6 +508,7 @@ export default function Home() {
         const savedAllowed = savedTab && TAB_IDS.includes(savedTab) && (admin || !ADMIN_TABS.includes(savedTab));
         setTab(allowed ? allowed.tab : savedAllowed ? savedTab : admin ? "overview" : "mine");
         if (allowed && allowed.filter !== "all") setQueueFilter(allowed.filter);
+        if (allowed?.owner) setOwnerQueueName(allowed.owner);
         setNavigationReady(true);
       }
       await loadPeople();
@@ -610,11 +612,11 @@ export default function Home() {
   useEffect(() => {
     if (!session || !dataReady) return;
     const withFilter = (tab === "queue" || tab === "mine") && queueFilter !== "all";
-    const next = withFilter ? `#${tab}/${queueFilter}` : `#${tab}`;
+    const next = tab === "queue" && ownerQueueName ? `#queue/owner/${encodeURIComponent(ownerQueueName)}` : withFilter ? `#${tab}/${queueFilter}` : `#${tab}`;
     if (window.location.hash === next) return;
     if (!window.location.hash || parseHash(window.location.hash)?.tab === tab) window.history.replaceState(null, "", next);
     else window.history.pushState(null, "", next);
-  }, [dataReady, queueFilter, session, tab]);
+  }, [dataReady, ownerQueueName, queueFilter, session, tab]);
 
   useEffect(() => {
     function onPop() {
@@ -622,6 +624,7 @@ export default function Home() {
       if (!parsed || (!isAdmin && ADMIN_TABS.includes(parsed.tab))) return;
       setTab(parsed.tab);
       setQueueFilter(parsed.filter);
+      setOwnerQueueName(parsed.owner);
     }
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -656,11 +659,12 @@ export default function Home() {
                 : person.status === queueFilter);
       const countryMatch = countryFilter === "all" || locationValue(person.country) === countryFilter;
       const stateMatch = stateFilter === "all" || locationValue(person.region) === stateFilter;
-      return statusMatch && countryMatch && stateMatch && personMatchesQuery(person, query);
+      const ownerMatch = !ownerQueueName || person.assigned_name?.trim().toLowerCase() === ownerQueueName.trim().toLowerCase();
+      return statusMatch && ownerMatch && countryMatch && stateMatch && personMatchesQuery(person, query);
     });
     if (queueFilter === "due") result.sort((a, b) => new Date(a.last_contacted_at ?? 0).getTime() - new Date(b.last_contacted_at ?? 0).getTime());
     return result;
-  }, [countryFilter, queueFilter, query, queuePool, stateFilter, userEmail, userId]);
+  }, [countryFilter, ownerQueueName, queueFilter, query, queuePool, stateFilter, userEmail, userId]);
 
   async function requestOtp(event: FormEvent) {
     event.preventDefault();
@@ -782,9 +786,6 @@ export default function Home() {
       .from("distributors")
       .update({ assigned_to: profile?.id ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" })
       .in("id", selectedQueueIds)
-      .is("assigned_to", null)
-      .is("assigned_email", null)
-      .is("assigned_name", null)
       .select("id");
     setBulkAssignBusy(false);
     if (error) { notifyError(`Selected distributors could not be assigned: ${error.message}`); return; }
@@ -792,6 +793,18 @@ export default function Home() {
     setPeople((items) => items.map((item) => updatedIds.has(item.id) ? { ...item, assigned_to: profile?.id ?? null, assigned_email: entry.email, assigned_name: entry.display_name, status: "assigned" as ContactStatus } : item));
     setSelectedQueueIds([]);
     notify(`${updatedIds.size} distributor${updatedIds.size === 1 ? "" : "s"} assigned to ${entry.display_name}.`);
+  }
+
+  async function bulkUnassign() {
+    if (!supabase || !session || !isAdmin || !selectedQueueIds.length) return;
+    setBulkAssignBusy(true);
+    const { data, error } = await supabase.from("distributors").update({ assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" }).in("id", selectedQueueIds).select("id");
+    setBulkAssignBusy(false);
+    if (error) { notifyError(`Selected distributors could not be unassigned: ${error.message}`); return; }
+    const updatedIds = new Set((data ?? []).map((item) => item.id as string));
+    setPeople((items) => items.map((item) => updatedIds.has(item.id) ? { ...item, assigned_to: null, assigned_email: null, assigned_name: null, status: "unassigned" as ContactStatus } : item));
+    setSelectedQueueIds([]);
+    notify(`${updatedIds.size} distributor${updatedIds.size === 1 ? "" : "s"} returned to Unassigned.`);
   }
 
   async function openPerson(person: Person) {
@@ -1021,9 +1034,9 @@ export default function Home() {
         {tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}
         {tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}
         {tab === "queue" && <>
-          <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} users={users} selectedIds={selectedQueueIds} setSelectedIds={setSelectedQueueIds} bulkBusy={bulkAssignBusy} onBulkAssign={bulkAssign} />
+          <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} users={users} selectedIds={selectedQueueIds} setSelectedIds={setSelectedQueueIds} bulkBusy={bulkAssignBusy} onBulkAssign={bulkAssign} onBulkUnassign={bulkUnassign} ownerScope={ownerQueueName} onClearOwnerScope={() => setOwnerQueueName("")} />
         </>}
-        {tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} />}
+        {tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} onOpenBoard={(name) => { setOwnerQueueName(name); setQueueFilter("all"); setSelectedQueueIds([]); setTab("queue"); }} />}
         {tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} adminEmails={adminEmails} adminSaving={adminSaving} onSave={saveUserName} onAddAdmin={addAdministrator} />}
         {tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}
       </>}</main>
@@ -1061,7 +1074,7 @@ function Stat({ icon, tone, label, value, detail, onClick }: { icon: React.React
   return <button type="button" className="stat-card" onClick={onClick}><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-top"><span>{label}</span><ChevronRight size={17} /></div><strong>{value}</strong><p>{detail}</p></button>;
 }
 
-function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, onOpen, onExport, users = [], selectedIds = [], setSelectedIds, bulkBusy = false, onBulkAssign }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; onOpen: (person: Person) => void; onExport: () => void; users?: UserDirectoryEntry[]; selectedIds?: string[]; setSelectedIds?: (ids: string[]) => void; bulkBusy?: boolean; onBulkAssign?: (entry: UserDirectoryEntry) => void }) {
+function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, onOpen, onExport, users = [], selectedIds = [], setSelectedIds, bulkBusy = false, onBulkAssign, onBulkUnassign, ownerScope = "", onClearOwnerScope }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; onOpen: (person: Person) => void; onExport: () => void; users?: UserDirectoryEntry[]; selectedIds?: string[]; setSelectedIds?: (ids: string[]) => void; bulkBusy?: boolean; onBulkAssign?: (entry: UserDirectoryEntry) => void; onBulkUnassign?: () => void; ownerScope?: string; onClearOwnerScope?: () => void }) {
   const [agentEmail, setAgentEmail] = useState("");
   const countries = [...new Set(allPeople.map((person) => locationValue(person.country)).filter(Boolean))].sort();
   const states = [...new Set(allPeople.filter((person) => country === "all" || locationValue(person.country) === country).map((person) => locationValue(person.region)).filter(Boolean))].sort();
@@ -1084,18 +1097,19 @@ function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFi
   const emptyDetail = mode === "mine" ? "Claim a distributor from Available to add them here." : "Try another search or queue filter.";
   const searchTerm = query.trim();
   const selectable = mode === "admin" && Boolean(setSelectedIds);
-  const availableIds = people.filter((person) => !person.assigned_to && !person.assigned_email && !person.assigned_name).map((person) => person.id);
+  const visibleIds = people.map((person) => person.id);
   const selectedSet = new Set(selectedIds);
-  const allVisibleSelected = availableIds.length > 0 && availableIds.every((id) => selectedSet.has(id));
+  const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedSet.has(id));
   const selectedAgent = users.find((user) => user.email === agentEmail);
   const toggleSelected = (id: string) => setSelectedIds?.(selectedSet.has(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]);
-  const toggleAll = () => setSelectedIds?.(allVisibleSelected ? selectedIds.filter((id) => !availableIds.includes(id)) : [...new Set([...selectedIds, ...availableIds])]);
+  const toggleAll = () => setSelectedIds?.(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : [...new Set([...selectedIds, ...visibleIds])]);
   return <>
     <div className="page-heading queue-title"><div><span className="eyebrow">ONE PROFILE · ONE DISTRIBUTOR ID</span><h1>{heading}</h1><p>{description}</p></div><button className="secondary-button" onClick={onExport}><Download size={17} /> Export view</button></div>
+    {ownerScope && <div className="owner-scope-bar"><span>Showing <strong>{ownerScope}</strong>’s queue · {people.length.toLocaleString()} profiles</span><button type="button" className="text-button" onClick={onClearOwnerScope}>View full queue</button></div>}
     <div className="queue-toolbar"><div className="filter-tabs">{filters.map((item) => <button className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)} key={item.id}>{item.label}<span>{item.count}</span></button>)}</div><div className="toolbar-actions"><div className="location-filters"><select className="filter-select" aria-label="Filter by country" value={country} onChange={(event) => { setCountry(event.target.value); setState("all"); }}><option value="all">All countries</option>{countries.map((item) => <option value={item} key={item}>{item}</option>)}</select><select className="filter-select" aria-label="Filter by state" value={state} onChange={(event) => setState(event.target.value)}><option value="all">All states</option>{states.map((item) => <option value={item} key={item}>{item}</option>)}</select></div><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name, ID, country, state, rank or leader" /></div></div></div>
     {searchTerm && <div className="search-summary" aria-live="polite"><strong>{people.length.toLocaleString()}</strong> {people.length === 1 ? "result" : "results"} for “{searchTerm}”</div>}
-    {selectable && selectedIds.length > 0 && <div className="bulk-action-bar" aria-live="polite"><strong>{selectedIds.length} selected</strong><select className="filter-select" aria-label="Assign selected distributors to team member" value={agentEmail} onChange={(event) => setAgentEmail(event.target.value)}><option value="">Choose a team member…</option>{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}</option>)}</select><button type="button" className="primary-button" disabled={bulkBusy || !selectedAgent} onClick={() => selectedAgent && onBulkAssign?.(selectedAgent)}>{bulkBusy ? "Assigning…" : "Assign selected"}</button><button type="button" className="text-button" disabled={bulkBusy} onClick={() => setSelectedIds?.([])}>Clear</button></div>}
-    <section className="panel queue-panel"><div className={`queue-table ${selectable ? "queue-selectable" : ""}`}><div className="queue-head">{selectable && <span className="select-cell"><input type="checkbox" aria-label="Select all visible unassigned distributors" checked={allVisibleSelected} onChange={toggleAll} disabled={!availableIds.length} /></span>}<span>Distributor</span><span>Country / State</span><span>Opportunity</span><span>Owner</span><span>Last touch</span><span>Status</span><span></span></div>{people.map((person) => <PersonRow key={person.id} person={person} onOpen={onOpen} query={query} selectable={selectable} selected={selectedSet.has(person.id)} onSelect={toggleSelected} />)}{!people.length && <div className="empty-state"><Search size={28} /><strong>No matching profiles</strong><span>{emptyDetail}</span></div>}</div></section>
+    {selectable && selectedIds.length > 0 && <div className="bulk-action-bar" aria-live="polite"><strong>{selectedIds.length} selected</strong><select className="filter-select" aria-label="Choose assignment for selected distributors" value={agentEmail} onChange={(event) => setAgentEmail(event.target.value)}><option value="">Choose assignment…</option><option value="__unassigned__">Unassigned</option>{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}</option>)}</select><button type="button" className="primary-button" disabled={bulkBusy || !agentEmail} onClick={() => agentEmail === "__unassigned__" ? onBulkUnassign?.() : selectedAgent && onBulkAssign?.(selectedAgent)}>{bulkBusy ? "Updating…" : agentEmail === "__unassigned__" ? "Unassign selected" : "Assign selected"}</button><button type="button" className="text-button" disabled={bulkBusy} onClick={() => setSelectedIds?.([])}>Clear</button></div>}
+    <section className="panel queue-panel"><div className={`queue-table ${selectable ? "queue-selectable" : ""}`}><div className="queue-head">{selectable && <span className="select-cell"><input type="checkbox" aria-label="Select all visible distributors" checked={allVisibleSelected} onChange={toggleAll} disabled={!visibleIds.length} /></span>}<span>Distributor</span><span>Country / State</span><span>Opportunity</span><span>Owner</span><span>Last touch</span><span>Status</span><span></span></div>{people.map((person) => <PersonRow key={person.id} person={person} onOpen={onOpen} query={query} selectable={selectable} selected={selectedSet.has(person.id)} onSelect={toggleSelected} />)}{!people.length && <div className="empty-state"><Search size={28} /><strong>No matching profiles</strong><span>{emptyDetail}</span></div>}</div></section>
   </>;
 }
 
@@ -1105,8 +1119,7 @@ function PersonRow({ person, onOpen, query = "", selectable = false, selected = 
   const touchTitle = person.last_contacted_at ? formatDate(person.last_contacted_at) : person.source_contacted_by ? "Source workbook" : "No contact recorded";
   const dueDays = isFollowUpDue(person) ? daysSince(person.last_contacted_at) : null;
   const touchDetail = dueDays != null ? `Follow-up due · ${dueDays} days since contact` : person.last_outcome ?? person.source_notes ?? (person.source_contacted_by ? "Contact owner recorded" : "No activity yet");
-  const available = !person.assigned_to && !person.assigned_email && !person.assigned_name;
-  return <div className="queue-row" role="button" tabIndex={0} onClick={() => onOpen(person)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(person); } }}>{selectable && <span className="select-cell" onClick={(event) => event.stopPropagation()}>{available && <input type="checkbox" aria-label={`Select ${person.name}`} checked={selected} onChange={() => onSelect?.(person.id)} />}</span>}<span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} aria-label={`Open UID ${person.external_id} in Unicity Portal`}>UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small className={leaderMatch ? "match-reason" : undefined}>{leaderMatch ? `Leader: ${person.nearest_leader_name}` : pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></div>;
+  return <div className="queue-row" role="button" tabIndex={0} onClick={() => onOpen(person)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(person); } }}>{selectable && <span className="select-cell" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${person.name}`} checked={selected} onChange={() => onSelect?.(person.id)} /></span>}<span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} aria-label={`Open UID ${person.external_id} in Unicity Portal`}>UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small className={leaderMatch ? "match-reason" : undefined}>{leaderMatch ? `Leader: ${person.nearest_leader_name}` : pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></div>;
 }
 
 function Status({ status }: { status: ContactStatus }) {
@@ -1114,12 +1127,12 @@ function Status({ status }: { status: ContactStatus }) {
   return <span className={`status status-${status}`}><i />{labels[status]}</span>;
 }
 
-function Leaderboard({ people, teamActivities, sourcePeriod }: { people: Person[]; teamActivities: Activity[]; sourcePeriod: string }) {
+function Leaderboard({ people, teamActivities, sourcePeriod, onOpenBoard }: { people: Person[]; teamActivities: Activity[]; sourcePeriod: string; onOpenBoard: (name: string) => void }) {
   const team = getTeamMetrics(people, teamActivities);
   const podium = [team[1], team[0], team[2]].filter(Boolean);
   const positions = ["2nd", "1st", "3rd"];
   const tones = ["second", "first", "third"];
-  return <><div className="page-heading"><div><span className="eyebrow">SHARED TEAM VIEW</span><h1>Team coverage</h1><p>Current ownership plus preserved notes attributed to the employee who wrote them.</p></div><span className="source-chip">{sourcePeriod}</span></div>{podium.length ? <section className="podium">{podium.map((member, index) => <div className={`podium-card ${tones[index]}`} key={member.name}>{positions[index] === "1st" ? <Trophy /> : <Medal />}<div className="avatar podium-avatar">{member.initials}</div><span>{positions[index]}</span><h3>{member.name}</h3><strong>{member.assigned.toLocaleString()} profiles</strong><p>{member.rank} rank · {member.pcm} PCM · {member.notes} notes</p></div>)}</section> : null}<section className="panel leaderboard-full"><div className="panel-heading"><div><h3>{sourcePeriod} coverage</h3><p>Current boards with preserved source and Top Up notes</p></div></div><div className="standings-head"><span>Rank</span><span>Team member</span><span>Assigned</span><span>New</span><span>Rank push</span><span>PCM</span><span>Notes</span></div>{team.map((member, index) => <div className="standing-row" key={member.name}><strong>#{index + 1}</strong><span className="standing-person"><span className="avatar tiny-avatar">{member.initials}</span><b>{member.name}</b></span><b>{member.assigned}</b><b>{member.newDistributors}</b><b>{member.rank}</b><b>{member.pcm}</b><b>{member.notes}</b></div>)}{!team.length && <div className="empty-inline">No team ownership or notes are recorded yet.</div>}</section></>;
+  return <><div className="page-heading"><div><span className="eyebrow">SHARED TEAM VIEW</span><h1>Team coverage</h1><p>Current ownership plus preserved notes attributed to the employee who wrote them.</p></div><span className="source-chip">{sourcePeriod}</span></div>{podium.length ? <section className="podium">{podium.map((member, index) => <div className={`podium-card ${tones[index]}`} key={member.name}>{positions[index] === "1st" ? <Trophy /> : <Medal />}<div className="avatar podium-avatar">{member.initials}</div><span>{positions[index]}</span><h3>{member.name}</h3><strong>{member.assigned.toLocaleString()} profiles</strong><p>{member.rank} rank · {member.pcm} PCM · {member.notes} notes</p></div>)}</section> : null}<section className="panel leaderboard-full"><div className="panel-heading"><div><h3>{sourcePeriod} coverage</h3><p>Current boards with preserved source and Top Up notes</p></div></div><div className="standings-head"><span>Rank</span><span>Team member</span><span>Assigned</span><span>New</span><span>Rank push</span><span>PCM</span><span>Notes</span></div>{team.map((member, index) => <button type="button" className="standing-row" key={member.name} onClick={() => onOpenBoard(member.name)} aria-label={`Open ${member.name} queue`}><strong>#{index + 1}</strong><span className="standing-person"><span className="avatar tiny-avatar">{member.initials}</span><b>{member.name}</b></span><b>{member.assigned}</b><b>{member.newDistributors}</b><b>{member.rank}</b><b>{member.pcm}</b><b>{member.notes}</b></button>)}{!team.length && <div className="empty-inline">No team ownership or notes are recorded yet.</div>}</section></>;
 }
 
 function ManageUsers({ users, saving, adminEmails, adminSaving, onSave, onAddAdmin }: { users: UserDirectoryEntry[]; saving: string; adminEmails: string[]; adminSaving: boolean; onSave: (entry: UserDirectoryEntry, name: string) => void; onAddAdmin: (email: string) => Promise<boolean> }) {
