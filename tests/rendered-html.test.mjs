@@ -264,3 +264,28 @@ test("supports pre-login ownership and bulk admin assignment", async () => {
   assert.match(migration, /assigned_email = lower\(coalesce\(\(select auth\.jwt\(\)\) ->> 'email'/);
   assert.match(migration, /unique_directory_names/);
 });
+
+test("uses a standard mobile hamburger menu instead of bottom navigation", async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /className="mobile-menu-button"/);
+  assert.match(page, /mobileMenuOpen \? "mobile-open" : ""/);
+  assert.match(page, /className="mobile-nav-backdrop"/);
+  assert.match(styles, /\.sidebar\.mobile-open \{ transform: translate3d\(0,0,0\)/);
+  assert.match(styles, /transform: translate3d\(-105%,0,0\)/);
+  assert.doesNotMatch(styles, /height: 58px; width: 100%; bottom: 0; top: auto/);
+});
+
+test("admin checks bypass recursive topup_admins row security", async () => {
+  const migration = await readFile(
+    new URL("../supabase/migrations/20260814223000_fix_admin_policy_recursion.sql", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(migration, /create or replace function private\.is_topup_admin\(\)/);
+  assert.match(migration, /security definer/);
+  assert.match(migration, /set search_path = ''/);
+  assert.match(migration, /grant execute on function private\.is_topup_admin\(\) to authenticated/);
+});
