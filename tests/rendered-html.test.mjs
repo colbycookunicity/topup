@@ -230,10 +230,12 @@ test("animates the distributor drawer in and out accessibly", async () => {
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
   assert.match(page, /closing \? "is-closing" : "is-opening"/);
-  assert.match(page, /window\.setTimeout\(onClose, 240\)/);
+  assert.match(page, /window\.setTimeout\(onClose, 250\)/);
   assert.match(page, /role="dialog" aria-modal="true"/);
   assert.match(page, /event\.key === "Escape"/);
-  assert.match(styles, /drawer-panel-in 380ms cubic-bezier\(\.22,1,\.36,1\)/);
-  assert.match(styles, /drawer-panel-out 240ms cubic-bezier\(\.4,0,1,1\)/);
+  assert.match(styles, /drawer-panel-in 300ms cubic-bezier\(\.22,1,\.36,1\)/);
+  assert.match(styles, /drawer-panel-out 250ms cubic-bezier\(\.4,0,1,1\)/);
+  assert.match(styles, /drawer-panel-in \{ from \{ transform: translate3d\(100%,0,0\); \}/);
+  assert.doesNotMatch(styles, /drawer-panel-in \{[^}]*opacity/);
   assert.match(styles, /prefers-reduced-motion: reduce/);
 });

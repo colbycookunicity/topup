@@ -1098,7 +1098,7 @@ function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activitie
     if (closingRef.current) return;
     closingRef.current = true;
     setClosing(true);
-    closeTimer.current = window.setTimeout(onClose, 240);
+    closeTimer.current = window.setTimeout(onClose, 250);
   }, [onClose]);
 
   useEffect(() => {
