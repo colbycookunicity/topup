@@ -256,8 +256,9 @@ test("supports pre-login ownership and bulk admin assignment", async () => {
     readFile(new URL("../supabase/migrations/20260814211500_add_email_ownership_and_bulk_assignment.sql", import.meta.url), "utf8"),
   ]);
   assert.match(page, /assigned_email\?: string \| null/);
-  assert.match(page, /function BulkAssignTool/);
-  assert.match(page, /Select all \{available\.length\.toLocaleString\(\)\} visible unassigned/);
+  assert.doesNotMatch(page, /function BulkAssignTool/);
+  assert.match(page, /Select all visible unassigned distributors/);
+  assert.match(page, /Assign selected/);
   assert.match(page, /\.in\("id", selectedQueueIds\)/);
   assert.match(page, /assigned_email: entry\.email/);
   assert.match(migration, /add column if not exists assigned_email text/);
@@ -290,14 +291,16 @@ test("admin checks bypass recursive topup_admins row security", async () => {
   assert.match(migration, /grant execute on function private\.is_topup_admin\(\) to authenticated/);
 });
 
-test("keeps the mobile bulk assignment tool left aligned without queue overflow", async () => {
+test("uses standard queue checkboxes for filtered bulk assignment", async () => {
   const [page, styles] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /bulk-assign-heading[\s\S]*secondary-button[\s\S]*ADMIN ASSIGNMENT TOOL/);
-  assert.match(styles, /\.bulk-assign-heading button \{ width: auto; align-self: flex-start; \}/);
-  assert.match(styles, /\.queue-row \{ grid-template-columns: minmax\(0,1fr\) 18px/);
+  assert.doesNotMatch(page, /ADMIN ASSIGNMENT TOOL/);
+  assert.match(page, /className="select-cell"/);
+  assert.match(page, /Select all visible unassigned distributors/);
+  assert.match(page, /Choose a team member/);
+  assert.match(styles, /\.queue-selectable \.queue-row \{ grid-template-columns: 34px minmax\(0,1fr\) 18px/);
   assert.match(styles, /\.uid-line \{ max-width: 100%; overflow: hidden !important; \}/);
 });
