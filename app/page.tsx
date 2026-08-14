@@ -1082,8 +1082,8 @@ function BulkAssignTool({ people, users, selectedIds, setSelectedIds, busy, onAs
 
   return <section className={`panel bulk-assign-tool ${open ? "open" : ""}`}>
     <div className="bulk-assign-heading">
-      <div><span className="eyebrow">ADMIN ASSIGNMENT TOOL</span><h3>Assign multiple distributors</h3><p>Select unassigned profiles from the current filtered view, then send them to one agent.</p></div>
       <button type="button" className="secondary-button" onClick={() => setOpen((value) => !value)}><UserRoundCheck size={17} /> {open ? "Close tool" : "Bulk assign"}</button>
+      <div><span className="eyebrow">ADMIN ASSIGNMENT TOOL</span><h3>Assign multiple distributors</h3><p>Select unassigned profiles from the current filtered view, then send them to one agent.</p></div>
     </div>
     {open && <div className="bulk-assign-body">
       <div className="bulk-assign-controls">
@@ -1092,7 +1092,7 @@ function BulkAssignTool({ people, users, selectedIds, setSelectedIds, busy, onAs
       </div>
       <div className="bulk-selection-summary" aria-live="polite"><strong>{selectedIds.length.toLocaleString()}</strong> selected · <span>{available.length.toLocaleString()} unassigned in this view</span></div>
       <div className="bulk-distributor-list">
-        {available.map((person) => <label className={selectedSet.has(person.id) ? "selected" : ""} key={person.id}><input type="checkbox" checked={selectedSet.has(person.id)} onChange={() => toggle(person.id)} /><span className="avatar tiny-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small>UID {person.external_id} · {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""}</small></span></label>)}
+        {available.map((person) => <label className={selectedSet.has(person.id) ? "selected" : ""} key={person.id}><input type="checkbox" checked={selectedSet.has(person.id)} onChange={() => toggle(person.id)} /><span><strong>{person.name}</strong><small>UID {person.external_id} · {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""}</small></span></label>)}
         {!available.length && <div className="empty-inline">No unassigned distributors match the current filters.</div>}
       </div>
     </div>}

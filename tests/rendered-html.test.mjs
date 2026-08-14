@@ -289,3 +289,15 @@ test("admin checks bypass recursive topup_admins row security", async () => {
   assert.match(migration, /set search_path = ''/);
   assert.match(migration, /grant execute on function private\.is_topup_admin\(\) to authenticated/);
 });
+
+test("keeps the mobile bulk assignment tool left aligned without queue overflow", async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+
+  assert.match(page, /bulk-assign-heading[\s\S]*secondary-button[\s\S]*ADMIN ASSIGNMENT TOOL/);
+  assert.match(styles, /\.bulk-assign-heading button \{ width: auto; align-self: flex-start; \}/);
+  assert.match(styles, /\.queue-row \{ grid-template-columns: minmax\(0,1fr\) 18px/);
+  assert.match(styles, /\.uid-line \{ max-width: 100%; overflow: hidden !important; \}/);
+});
