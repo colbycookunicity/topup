@@ -329,3 +329,12 @@ test("locks activity submission immediately and shows saving feedback", async ()
   assert.match(page, /saving \? "Saving…" : "Save activity"/);
   assert.match(page, /disabled=\{saving\}/);
 });
+
+test("places search first and sorts queue columns", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /queue-toolbar"><div className="toolbar-actions"><div className="search-box"/);
+  assert.match(page, /function changeSort/);
+  assert.match(page, /<QueueSortHeader field="name" label="Distributor"/);
+  assert.match(page, /<QueueSortHeader field="touch" label="Last touch"/);
+  assert.match(page, /sortedPeople\.map/);
+});

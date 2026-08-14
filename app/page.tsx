@@ -2,6 +2,7 @@
 
 import {
   ArrowRight,
+  ArrowUpDown,
   Check,
   ChevronDown,
   ChevronRight,
@@ -37,6 +38,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 type Tab = "overview" | "mine" | "queue" | "leaderboard" | "users" | "imports";
 const TAB_STORAGE_KEY = "topup:last-tab";
 type ContactStatus = "unassigned" | "assigned" | "contacted" | "follow-up" | "complete";
+type QueueSortKey = "name" | "market" | "opportunity" | "owner" | "touch" | "status";
 
 const TAB_IDS: Tab[] = ["overview", "mine", "queue", "leaderboard", "users", "imports"];
 const ADMIN_TABS: Tab[] = ["overview", "users", "imports"];
@@ -1084,8 +1086,14 @@ function Stat({ icon, tone, label, value, detail, onClick }: { icon: React.React
   return <button type="button" className="stat-card" onClick={onClick}><div className={`stat-icon ${tone}`}>{icon}</div><div className="stat-top"><span>{label}</span><ChevronRight size={17} /></div><strong>{value}</strong><p>{detail}</p></button>;
 }
 
+function QueueSortHeader({ field, label, activeField, direction, onSort }: { field: QueueSortKey; label: string; activeField: QueueSortKey; direction: "asc" | "desc"; onSort: (field: QueueSortKey) => void }) {
+  return <button type="button" className={activeField === field ? "sort-header active" : "sort-header"} onClick={() => onSort(field)} aria-label={`Sort by ${label} ${activeField === field && direction === "asc" ? "descending" : "ascending"}`}>{label}<ArrowUpDown size={13} /></button>;
+}
+
 function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, onOpen, onExport, users = [], selectedIds = [], setSelectedIds, bulkBusy = false, onBulkAssign, onBulkUnassign, ownerScope = "", onClearOwnerScope }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; onOpen: (person: Person) => void; onExport: () => void; users?: UserDirectoryEntry[]; selectedIds?: string[]; setSelectedIds?: (ids: string[]) => void; bulkBusy?: boolean; onBulkAssign?: (entry: UserDirectoryEntry) => void; onBulkUnassign?: () => void; ownerScope?: string; onClearOwnerScope?: () => void }) {
   const [agentEmail, setAgentEmail] = useState("");
+  const [sortKey, setSortKey] = useState<QueueSortKey>("name");
+  const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const countries = [...new Set(allPeople.map((person) => locationValue(person.country)).filter(Boolean))].sort();
   const states = [...new Set(allPeople.filter((person) => country === "all" || locationValue(person.country) === country).map((person) => locationValue(person.region)).filter(Boolean))].sort();
   const scopedPeople = allPeople.filter((person) => {
@@ -1113,13 +1121,23 @@ function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFi
   const selectedAgent = users.find((user) => user.email === agentEmail);
   const toggleSelected = (id: string) => setSelectedIds?.(selectedSet.has(id) ? selectedIds.filter((item) => item !== id) : [...selectedIds, id]);
   const toggleAll = () => setSelectedIds?.(allVisibleSelected ? selectedIds.filter((id) => !visibleIds.includes(id)) : [...new Set([...selectedIds, ...visibleIds])]);
+  const sortedPeople = useMemo(() => [...people].sort((a, b) => {
+    const value = (person: Person) => sortKey === "name" ? person.name : sortKey === "market" ? `${locationValue(person.country)} ${locationValue(person.region)}` : sortKey === "opportunity" ? person.target_rank ?? person.current_rank ?? "" : sortKey === "owner" ? person.assigned_name ?? "" : sortKey === "touch" ? new Date(person.last_contacted_at ?? 0).getTime() : person.status;
+    const left = value(a); const right = value(b);
+    const comparison = typeof left === "number" && typeof right === "number" ? left - right : String(left).localeCompare(String(right), undefined, { numeric: true, sensitivity: "base" });
+    return sortDirection === "asc" ? comparison : -comparison;
+  }), [people, sortDirection, sortKey]);
+  function changeSort(next: QueueSortKey) {
+    if (sortKey === next) setSortDirection((direction) => direction === "asc" ? "desc" : "asc");
+    else { setSortKey(next); setSortDirection("asc"); }
+  }
   return <>
     <div className="page-heading queue-title"><div><span className="eyebrow">ONE PROFILE · ONE DISTRIBUTOR ID</span><h1>{heading}</h1><p>{description}</p></div><button className="secondary-button" onClick={onExport}><Download size={17} /> Export view</button></div>
     {ownerScope && <div className="owner-scope-bar"><span>Showing <strong>{ownerScope}</strong>’s queue · {people.length.toLocaleString()} profiles</span><button type="button" className="text-button" onClick={onClearOwnerScope}>View full queue</button></div>}
-    <div className="queue-toolbar"><div className="filter-tabs">{filters.map((item) => <button className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)} key={item.id}>{item.label}<span>{item.count}</span></button>)}</div><div className="toolbar-actions"><div className="location-filters"><select className="filter-select" aria-label="Filter by country" value={country} onChange={(event) => { setCountry(event.target.value); setState("all"); }}><option value="all">All countries</option>{countries.map((item) => <option value={item} key={item}>{item}</option>)}</select><select className="filter-select" aria-label="Filter by state" value={state} onChange={(event) => setState(event.target.value)}><option value="all">All states</option>{states.map((item) => <option value={item} key={item}>{item}</option>)}</select></div><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name, ID, country, state, rank or leader" /></div></div></div>
+    <div className="queue-toolbar"><div className="toolbar-actions"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name, ID, country, state, rank or leader" /></div><div className="location-filters"><select className="filter-select" aria-label="Filter by country" value={country} onChange={(event) => { setCountry(event.target.value); setState("all"); }}><option value="all">All countries</option>{countries.map((item) => <option value={item} key={item}>{item}</option>)}</select><select className="filter-select" aria-label="Filter by state" value={state} onChange={(event) => setState(event.target.value)}><option value="all">All states</option>{states.map((item) => <option value={item} key={item}>{item}</option>)}</select></div></div><div className="filter-tabs">{filters.map((item) => <button className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)} key={item.id}>{item.label}<span>{item.count}</span></button>)}</div></div>
     {searchTerm && <div className="search-summary" aria-live="polite"><strong>{people.length.toLocaleString()}</strong> {people.length === 1 ? "result" : "results"} for “{searchTerm}”</div>}
     {selectable && selectedIds.length > 0 && <div className="bulk-action-bar" aria-live="polite"><strong>{selectedIds.length} selected</strong><select className="filter-select" aria-label="Choose assignment for selected distributors" value={agentEmail} onChange={(event) => setAgentEmail(event.target.value)}><option value="">Choose assignment…</option><option value="__unassigned__">Unassigned</option>{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}</option>)}</select><button type="button" className="primary-button" disabled={bulkBusy || !agentEmail} onClick={() => agentEmail === "__unassigned__" ? onBulkUnassign?.() : selectedAgent && onBulkAssign?.(selectedAgent)}>{bulkBusy ? "Updating…" : agentEmail === "__unassigned__" ? "Unassign selected" : "Assign selected"}</button><button type="button" className="text-button" disabled={bulkBusy} onClick={() => setSelectedIds?.([])}>Clear</button></div>}
-    <section className="panel queue-panel"><div className={`queue-table ${selectable ? "queue-selectable" : ""}`}><div className="queue-head">{selectable && <span className="select-cell"><input type="checkbox" aria-label="Select all visible distributors" checked={allVisibleSelected} onChange={toggleAll} disabled={!visibleIds.length} /></span>}<span>Distributor</span><span>Country / State</span><span>Opportunity</span><span>Owner</span><span>Last touch</span><span>Status</span><span></span></div>{people.map((person) => <PersonRow key={person.id} person={person} onOpen={onOpen} query={query} selectable={selectable} selected={selectedSet.has(person.id)} onSelect={toggleSelected} />)}{!people.length && <div className="empty-state"><Search size={28} /><strong>No matching profiles</strong><span>{emptyDetail}</span></div>}</div></section>
+    <section className="panel queue-panel"><div className={`queue-table ${selectable ? "queue-selectable" : ""}`}><div className="queue-head">{selectable && <span className="select-cell"><input type="checkbox" aria-label="Select all visible distributors" checked={allVisibleSelected} onChange={toggleAll} disabled={!visibleIds.length} /></span>}<QueueSortHeader field="name" label="Distributor" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><QueueSortHeader field="market" label="Country / State" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><QueueSortHeader field="opportunity" label="Opportunity" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><QueueSortHeader field="owner" label="Owner" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><QueueSortHeader field="touch" label="Last touch" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><QueueSortHeader field="status" label="Status" activeField={sortKey} direction={sortDirection} onSort={changeSort} /><span></span></div>{sortedPeople.map((person) => <PersonRow key={person.id} person={person} onOpen={onOpen} query={query} selectable={selectable} selected={selectedSet.has(person.id)} onSelect={toggleSelected} />)}{!people.length && <div className="empty-state"><Search size={28} /><strong>No matching profiles</strong><span>{emptyDetail}</span></div>}</div></section>
   </>;
 }
 
