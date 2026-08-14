@@ -557,17 +557,21 @@ export default function Home() {
   }
 
   async function addAdministrator(email: string) {
-    if (!supabase || !isAdmin) return;
+    if (!supabase || !isAdmin) return false;
     const normalized = email.trim().toLowerCase();
-    if (!/^[^\s@]+@unicity\.com$/.test(normalized)) { notifyError("Enter a valid @unicity.com email address."); return; }
-    if (adminEmails.includes(normalized)) { notifyError(`${normalized} is already an administrator.`); return; }
+    if (!/^[^\s@]+@unicity\.com$/.test(normalized)) { notifyError("Enter a valid @unicity.com email address."); return false; }
+    if (adminEmails.includes(normalized)) { notify(`${normalized} already has administrator access.`); return true; }
     setAdminSaving(true);
     const { error } = await supabase.from("topup_admins").insert({ email: normalized });
+    if (error && error.code !== "23505") {
+      setAdminSaving(false);
+      notifyError(`Administrator could not be added: ${error.message}`);
+      return false;
+    }
+    await loadUsers();
     setAdminSaving(false);
-    if (error) { notifyError(`Administrator could not be added: ${error.message}`); return; }
-    setAdminEmails((items) => [...items, normalized].sort());
-    setUsers((items) => items.map((item) => item.email === normalized ? { ...item, is_admin: true } : item));
-    notify(`${normalized} is now a Top Up administrator.`);
+    notify(error?.code === "23505" ? `${normalized} already has administrator access.` : `${normalized} is now a Top Up administrator.`);
+    return true;
   }
 
   async function saveProfileName(event: FormEvent) {
@@ -1046,12 +1050,11 @@ function Leaderboard({ people, teamActivities, sourcePeriod }: { people: Person[
   return <><div className="page-heading"><div><span className="eyebrow">SHARED TEAM VIEW</span><h1>Team coverage</h1><p>Current ownership plus preserved notes attributed to the employee who wrote them.</p></div><span className="source-chip">{sourcePeriod}</span></div>{podium.length ? <section className="podium">{podium.map((member, index) => <div className={`podium-card ${tones[index]}`} key={member.name}>{positions[index] === "1st" ? <Trophy /> : <Medal />}<div className="avatar podium-avatar">{member.initials}</div><span>{positions[index]}</span><h3>{member.name}</h3><strong>{member.assigned.toLocaleString()} profiles</strong><p>{member.rank} rank · {member.pcm} PCM · {member.notes} notes</p></div>)}</section> : null}<section className="panel leaderboard-full"><div className="panel-heading"><div><h3>{sourcePeriod} coverage</h3><p>Current boards with preserved source and Top Up notes</p></div></div><div className="standings-head"><span>Rank</span><span>Team member</span><span>Assigned</span><span>New</span><span>Rank push</span><span>PCM</span><span>Notes</span></div>{team.map((member, index) => <div className="standing-row" key={member.name}><strong>#{index + 1}</strong><span className="standing-person"><span className="avatar tiny-avatar">{member.initials}</span><b>{member.name}</b></span><b>{member.assigned}</b><b>{member.newDistributors}</b><b>{member.rank}</b><b>{member.pcm}</b><b>{member.notes}</b></div>)}{!team.length && <div className="empty-inline">No team ownership or notes are recorded yet.</div>}</section></>;
 }
 
-function ManageUsers({ users, saving, adminEmails, adminSaving, onSave, onAddAdmin }: { users: UserDirectoryEntry[]; saving: string; adminEmails: string[]; adminSaving: boolean; onSave: (entry: UserDirectoryEntry, name: string) => void; onAddAdmin: (email: string) => void }) {
+function ManageUsers({ users, saving, adminEmails, adminSaving, onSave, onAddAdmin }: { users: UserDirectoryEntry[]; saving: string; adminEmails: string[]; adminSaving: boolean; onSave: (entry: UserDirectoryEntry, name: string) => void; onAddAdmin: (email: string) => Promise<boolean> }) {
   const [newAdminEmail, setNewAdminEmail] = useState("");
-  function submitAdmin(event: FormEvent) {
+  async function submitAdmin(event: FormEvent) {
     event.preventDefault();
-    onAddAdmin(newAdminEmail);
-    if (/^[^\s@]+@unicity\.com$/i.test(newAdminEmail.trim())) setNewAdminEmail("");
+    if (await onAddAdmin(newAdminEmail)) setNewAdminEmail("");
   }
   return <>
     <div className="page-heading"><div><span className="eyebrow">ADMINISTRATION</span><h1>Manage users</h1><p>Manage Top Up administrators, display names, and recent sign-ins.</p></div><div className="admin-badge"><ShieldCheck size={16} /> Admin only</div></div>

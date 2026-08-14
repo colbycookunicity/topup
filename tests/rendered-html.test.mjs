@@ -163,6 +163,18 @@ test("allows existing admins to add Unicity administrators", async () => {
   assert.match(migration, /revoke all on function private\.sync_topup_directory_admin_role\(\) from public, anon, authenticated/);
 });
 
+test("shows pre-provisioned administrators and treats duplicate grants as success", async () => {
+  const [page, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260814163802_repair_admin_directory_visibility.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /error\.code !== "23505"/);
+  assert.match(page, /await loadUsers\(\)/);
+  assert.match(migration, /admins can view all admin records/);
+  assert.match(migration, /insert into public\.topup_user_directory/);
+  assert.match(migration, /'sam\.hughes@unicity\.com', 'Sam Hughes', true/);
+});
+
 test("links distributor UIDs to Portal and keeps email copy beside the visible address", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
   assert.match(page, /portal\.unicity\.com\/#\/customers\/\$\{encodeURIComponent\(distributorId\)\}\/overview/);
