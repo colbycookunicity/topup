@@ -364,6 +364,8 @@ export default function Home() {
   const [activityType, setActivityType] = useState("Phone call");
   const [activityOutcome, setActivityOutcome] = useState("Connected — follow-up needed");
   const [activityNote, setActivityNote] = useState("");
+  const [activitySaving, setActivitySaving] = useState(false);
+  const activitySubmitLock = useRef(false);
   const [toast, setToast] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [importBusy, setImportBusy] = useState(false);
   const [importResult, setImportResult] = useState("");
@@ -659,12 +661,12 @@ export default function Home() {
                 : person.status === queueFilter);
       const countryMatch = countryFilter === "all" || locationValue(person.country) === countryFilter;
       const stateMatch = stateFilter === "all" || locationValue(person.region) === stateFilter;
-      const ownerMatch = !ownerQueueName || person.assigned_name?.trim().toLowerCase() === ownerQueueName.trim().toLowerCase();
+      const ownerMatch = tab !== "queue" || !ownerQueueName || person.assigned_name?.trim().toLowerCase() === ownerQueueName.trim().toLowerCase();
       return statusMatch && ownerMatch && countryMatch && stateMatch && personMatchesQuery(person, query);
     });
     if (queueFilter === "due") result.sort((a, b) => new Date(a.last_contacted_at ?? 0).getTime() - new Date(b.last_contacted_at ?? 0).getTime());
     return result;
-  }, [countryFilter, ownerQueueName, queueFilter, query, queuePool, stateFilter, userEmail, userId]);
+  }, [countryFilter, ownerQueueName, queueFilter, query, queuePool, stateFilter, tab, userEmail, userId]);
 
   async function requestOtp(event: FormEvent) {
     event.preventDefault();
@@ -861,26 +863,33 @@ export default function Home() {
 
   async function saveActivity(event: FormEvent) {
     event.preventDefault();
-    if (!selected || !supabase || !session) return;
-    const now = new Date().toISOString();
-    const status: ContactStatus = activityOutcome.includes("Completed") || activityOutcome.includes("no help") ? "complete" : "follow-up";
-    const { data: activity, error } = await supabase.from("activities").insert({ distributor_id: selected.id, user_id: session.user.id, activity_type: activityType, outcome: activityOutcome, notes: activityNote }).select("id,distributor_id,user_id,activity_type,outcome,notes,created_at").single();
-    if (error) { notifyError(error.message); return; }
-    const savedActivity = activity ? { ...activity, author_name: userName } as Activity : null;
-    const canUpdateSummary = isAdmin || selected.assigned_to === session.user.id;
-    let next = selected;
-    if (canUpdateSummary) {
-      const { error: updateError } = await supabase.from("distributors").update({ status, last_contacted_at: now, last_outcome: activityOutcome, notes: activityNote || selected.notes }).eq("id", selected.id);
-      if (!updateError) {
-        next = { ...selected, status, last_contacted_at: now, last_outcome: activityOutcome, notes: activityNote || selected.notes };
-        setPeople((items) => items.map((item) => item.id === selected.id ? next : item));
+    if (activitySubmitLock.current || !selected || !supabase || !session) return;
+    activitySubmitLock.current = true;
+    setActivitySaving(true);
+    try {
+      const now = new Date().toISOString();
+      const status: ContactStatus = activityOutcome.includes("Completed") || activityOutcome.includes("no help") ? "complete" : "follow-up";
+      const { data: activity, error } = await supabase.from("activities").insert({ distributor_id: selected.id, user_id: session.user.id, activity_type: activityType, outcome: activityOutcome, notes: activityNote }).select("id,distributor_id,user_id,activity_type,outcome,notes,created_at").single();
+      if (error) { notifyError(error.message); return; }
+      const savedActivity = activity ? { ...activity, author_name: userName } as Activity : null;
+      const canUpdateSummary = isAdmin || selected.assigned_to === session.user.id;
+      let next = selected;
+      if (canUpdateSummary) {
+        const { error: updateError } = await supabase.from("distributors").update({ status, last_contacted_at: now, last_outcome: activityOutcome, notes: activityNote || selected.notes }).eq("id", selected.id);
+        if (!updateError) {
+          next = { ...selected, status, last_contacted_at: now, last_outcome: activityOutcome, notes: activityNote || selected.notes };
+          setPeople((items) => items.map((item) => item.id === selected.id ? next : item));
+        }
       }
+      if (savedActivity) {
+        setActivities((items) => [savedActivity, ...items]);
+        setTeamActivities((items) => [savedActivity, ...items]);
+      }
+      setSelected(next); setActivityOpen(false); setActivityNote(""); notify(canUpdateSummary ? "Activity logged." : "Team context note added.");
+    } finally {
+      activitySubmitLock.current = false;
+      setActivitySaving(false);
     }
-    if (savedActivity) {
-      setActivities((items) => [savedActivity, ...items]);
-      setTeamActivities((items) => [savedActivity, ...items]);
-    }
-    setSelected(next); setActivityOpen(false); setActivityNote(""); notify(canUpdateSummary ? "Activity logged." : "Team context note added.");
   }
 
   async function prepareImport(file: File) {
@@ -1012,6 +1021,7 @@ export default function Home() {
 
   function navigateTo(nextTab: Tab, resetQueue = false) {
     if (resetQueue) setQueueFilter("all");
+    if (nextTab !== "queue") setOwnerQueueName("");
     setTab(nextTab);
     setMobileMenuOpen(false);
   }
@@ -1042,7 +1052,7 @@ export default function Home() {
       </>}</main>
     </div>
     {selected && <PersonDrawer key={selected.id} person={selected} leader={selectedLeader} currentUserId={userId} isAdmin={isAdmin} users={users} activities={activities} activitiesLoading={activitiesLoading} releaseBusy={releaseBusy} onClose={() => setSelected(null)} onClaim={() => claim(selected)} onLog={() => setActivityOpen(true)} onRelease={() => release(selected)} onOpenLeader={openPerson} onAssign={(entry) => adminAssign(selected, entry)} />}
-    {activityOpen && selected && <ActivityModal person={selected} type={activityType} setType={setActivityType} outcome={activityOutcome} setOutcome={setActivityOutcome} note={activityNote} setNote={setActivityNote} onClose={() => setActivityOpen(false)} onSave={saveActivity} />}
+    {activityOpen && selected && <ActivityModal person={selected} type={activityType} setType={setActivityType} outcome={activityOutcome} setOutcome={setActivityOutcome} note={activityNote} setNote={setActivityNote} saving={activitySaving} onClose={() => { if (!activitySaving) setActivityOpen(false); }} onSave={saveActivity} />}
     {toast && <div className={toast.tone === "error" ? "toast toast-error" : "toast"} role="status" aria-live="polite">{toast.tone === "error" ? <CircleAlert size={18} /> : <Check size={18} />}{toast.text}</div>}
   </div>;
 }
@@ -1213,6 +1223,6 @@ function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activitie
   </div>;
 }
 
-function ActivityModal({ person, type, setType, outcome, setOutcome, note, setNote, onClose, onSave }: { person: Person; type: string; setType: (value: string) => void; outcome: string; setOutcome: (value: string) => void; note: string; setNote: (value: string) => void; onClose: () => void; onSave: (event: FormEvent) => void }) {
-  return <div className="modal-backdrop"><form className="modal" onSubmit={onSave}><div className="modal-header"><div><span className="eyebrow">SHARED TEAM ACTIVITY</span><h2>Add context for {person.name}</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={20} /></button></div><label>Activity type<select value={type} onChange={(event) => setType(event.target.value)}><option>Context note</option><option>Phone call</option><option>Email</option><option>WhatsApp</option><option>Zoom meeting</option></select></label><label>Outcome<select value={outcome} onChange={(event) => setOutcome(event.target.value)}><option>Shared team context</option><option>Connected — follow-up needed</option><option>Strategy call booked</option><option>Sent message — awaiting reply</option><option>Welcomed — no help needed</option><option>Completed — rank plan confirmed</option><option>No response</option></select></label><label>Notes<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Questions, next action, or context for the team…" rows={4} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button"><Check size={17} /> Save activity</button></div></form></div>;
+function ActivityModal({ person, type, setType, outcome, setOutcome, note, setNote, saving, onClose, onSave }: { person: Person; type: string; setType: (value: string) => void; outcome: string; setOutcome: (value: string) => void; note: string; setNote: (value: string) => void; saving: boolean; onClose: () => void; onSave: (event: FormEvent) => void }) {
+  return <div className="modal-backdrop"><form className="modal" onSubmit={onSave} aria-busy={saving}><div className="modal-header"><div><span className="eyebrow">SHARED TEAM ACTIVITY</span><h2>Add context for {person.name}</h2></div><button type="button" className="icon-button" onClick={onClose} disabled={saving}><X size={20} /></button></div><label>Activity type<select value={type} onChange={(event) => setType(event.target.value)} disabled={saving}><option>Context note</option><option>Phone call</option><option>Email</option><option>WhatsApp</option><option>Zoom meeting</option></select></label><label>Outcome<select value={outcome} onChange={(event) => setOutcome(event.target.value)} disabled={saving}><option>Shared team context</option><option>Connected — follow-up needed</option><option>Strategy call booked</option><option>Sent message — awaiting reply</option><option>Welcomed — no help needed</option><option>Completed — rank plan confirmed</option><option>No response</option></select></label><label>Notes<textarea value={note} onChange={(event) => setNote(event.target.value)} placeholder="Questions, next action, or context for the team…" rows={4} disabled={saving} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose} disabled={saving}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? "Saving…" : "Save activity"}</button></div></form></div>;
 }

@@ -314,3 +314,18 @@ test("lets admins open an employee queue from team coverage", async () => {
   assert.match(page, /Showing <strong>\{ownerScope\}<\/strong>’s queue/);
   assert.match(page, /View full queue/);
 });
+
+test("does not apply an employee queue scope to My Board", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /tab !== "queue" \|\| !ownerQueueName/);
+  assert.match(page, /if \(nextTab !== "queue"\) setOwnerQueueName\(""\)/);
+});
+
+test("locks activity submission immediately and shows saving feedback", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /activitySubmitLock\.current \|\| !selected/);
+  assert.match(page, /activitySubmitLock\.current = true/);
+  assert.match(page, /aria-busy=\{saving\}/);
+  assert.match(page, /saving \? "Saving…" : "Save activity"/);
+  assert.match(page, /disabled=\{saving\}/);
+});
