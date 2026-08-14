@@ -1090,9 +1090,34 @@ function Imports({ busy, result, history, pending, onImport, onConfirm, onCancel
 function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activities, activitiesLoading, releaseBusy, onClose, onClaim, onLog, onRelease, onOpenLeader, onAssign }: { person: Person; leader: Person | null; currentUserId: string; isAdmin: boolean; users: UserDirectoryEntry[]; activities: Activity[]; activitiesLoading: boolean; releaseBusy: boolean; onClose: () => void; onClaim: () => void; onLog: () => void; onRelease: () => void; onOpenLeader: (person: Person) => void; onAssign: (entry: UserDirectoryEntry | null) => void }) {
   const linkedToUser = person.assigned_to === currentUserId;
   const canLink = !person.assigned_to && !person.assigned_name;
-  return <div className="drawer-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-    <aside className="drawer">
-      <div className="drawer-header"><div><span className="eyebrow">DISTRIBUTOR PROFILE</span><h2>{person.name}</h2></div><button className="icon-button" onClick={onClose} aria-label="Close profile"><X size={20} /></button></div>
+  const [closing, setClosing] = useState(false);
+  const closingRef = useRef(false);
+  const closeTimer = useRef<number | null>(null);
+
+  const closeDrawer = useCallback(() => {
+    if (closingRef.current) return;
+    closingRef.current = true;
+    setClosing(true);
+    closeTimer.current = window.setTimeout(onClose, 240);
+  }, [onClose]);
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function closeWithKeyboard(event: KeyboardEvent) {
+      if (event.key === "Escape") closeDrawer();
+    }
+    document.addEventListener("keydown", closeWithKeyboard);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", closeWithKeyboard);
+      if (closeTimer.current != null) window.clearTimeout(closeTimer.current);
+    };
+  }, [closeDrawer]);
+
+  return <div className={`drawer-backdrop ${closing ? "is-closing" : "is-opening"}`} onMouseDown={(event) => event.target === event.currentTarget && closeDrawer()}>
+    <aside className="drawer" role="dialog" aria-modal="true" aria-label={`Distributor profile for ${person.name}`}>
+      <div className="drawer-header"><div><span className="eyebrow">DISTRIBUTOR PROFILE</span><h2>{person.name}</h2></div><button className="icon-button" onClick={closeDrawer} aria-label="Close profile"><X size={20} /></button></div>
       <div className="profile-summary"><div className="avatar profile-avatar">{initials(person.name)}</div><div><strong>{person.name}</strong><span className="profile-meta"><span className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer">UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></span><span>· {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""} · Joined {person.joined_at ? new Date(`${person.joined_at}T00:00:00`).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" }) : "not provided"}</span></span>{person.email && <span className="profile-email"><Mail size={14} aria-hidden="true" /><span>{person.email}</span><CopyButton value={person.email} label={`${person.email} email`} /></span>}<div className="profile-tags">{person.is_new_distributor && <b>New distributor</b>}{person.is_rank_opportunity && <b>Rank push</b>}{person.is_pcm_opportunity && <b>PCM pathway</b>}{person.has_ten_pack && <b>10 Pack</b>}{person.first_time_at_rank === true && <b>First time at rank</b>}</div></div></div>
       <div className="contact-actions">{person.phone ? <a href={`tel:${person.phone}`}><Phone size={17} /> Call</a> : <span aria-disabled="true"><Phone size={17} /> No phone</span>}{person.email ? <a href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer"><Mail size={17} /> Email</a> : <span aria-disabled="true"><Mail size={17} /> No email</span>}{person.phone ? <a href={`https://wa.me/${person.phone.replace(/\D/g, "")}`} target="_blank" rel="noopener noreferrer"><MessageCircle size={17} /> WhatsApp</a> : <span aria-disabled="true"><MessageCircle size={17} /> No WhatsApp</span>}</div>
       <section className="profile-section"><h3>Opportunity</h3><div className="rank-path"><div><span>CURRENT RANK</span><strong>{person.current_rank ?? "Not provided"}</strong></div><ArrowRight size={18} /><div><span>RUNNING FOR</span><strong>{person.target_rank ?? "Not provided"}</strong></div></div><div className="volume-card"><div><span>Total OV needed</span><strong>{person.gap_to_rank == null ? "Not provided" : person.gap_to_rank.toLocaleString()}</strong></div><div><span>Highest rank</span><strong>{person.highest_rank_name ?? "Not provided"}</strong></div></div>{person.nearest_leader_name && (leader ? <button type="button" className="leader-card" onClick={() => onOpenLeader(leader)}><span className="avatar tiny-avatar">{initials(leader.name)}</span><span className="leader-info"><strong>{leader.name}</strong><small>Nearest leader · {leader.assigned_name ? `Working with ${leader.assigned_name}` : "Available to claim"}</small></span><Status status={leader.status} /><ChevronRight size={17} /></button> : <div className="source-detail"><span>Nearest leader</span><strong>{person.nearest_leader_name}</strong></div>)}</section>

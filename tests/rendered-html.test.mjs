@@ -223,3 +223,17 @@ test("makes queue search matches and scoped counts understandable", async () => 
   assert.match(page, /results"} for “\{searchTerm\}”/);
   assert.match(page, /Leader: \$\{person\.nearest_leader_name\}/);
 });
+
+test("animates the distributor drawer in and out accessibly", async () => {
+  const [page, styles] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /closing \? "is-closing" : "is-opening"/);
+  assert.match(page, /window\.setTimeout\(onClose, 240\)/);
+  assert.match(page, /role="dialog" aria-modal="true"/);
+  assert.match(page, /event\.key === "Escape"/);
+  assert.match(styles, /drawer-panel-in 380ms cubic-bezier\(\.22,1,\.36,1\)/);
+  assert.match(styles, /drawer-panel-out 240ms cubic-bezier\(\.4,0,1,1\)/);
+  assert.match(styles, /prefers-reduced-motion: reduce/);
+});
