@@ -184,7 +184,7 @@ test("links distributor UIDs to Portal and keeps email copy beside the visible a
   assert.match(page, /label=\{`UID \$\{person\.external_id\}`\}/);
   assert.match(page, /label=\{`\$\{person\.email\} email`\}/);
   assert.match(page, /className="profile-email"/);
-  assert.match(page, /https:\/\/mail\.google\.com\/mail\/u\/0\/#inbox/);
+  assert.match(page, /https:\/\/mail\.google\.com\/mail\/u\/0\/\?view=cm&fs=1&to=/);
   assert.doesNotMatch(page, /mailto:/);
   assert.doesNotMatch(page, /contact-copy-button/);
 });
@@ -360,4 +360,10 @@ test("shows monthly selection, reappearances, and profile snapshot history", asy
   assert.match(page, /Back in \{formatPeriod\(person\.snapshot_period\)/);
   assert.match(page, /<h3>Monthly history<\/h3>/);
   assert.match(page, /monthlyActivities/);
+});
+
+test("email action composes a Gmail message to the distributor", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /mail\.google\.com\/mail\/u\/0\/\?view=cm&fs=1&to=\$\{encodeURIComponent\(person\.email\)\}/);
+  assert.doesNotMatch(page, /mail\.google\.com\/mail\/u\/0\/#inbox/);
 });
