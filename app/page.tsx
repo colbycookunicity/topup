@@ -42,7 +42,7 @@ type QueueSortKey = "name" | "market" | "opportunity" | "owner" | "touch" | "sta
 
 const TAB_IDS: Tab[] = ["overview", "mine", "queue", "leaderboard", "users", "imports"];
 const ADMIN_TABS: Tab[] = ["overview", "users", "imports"];
-const QUEUE_FILTER_IDS = ["all", "mine", "available", "new", "rank", "pcm", "due"];
+const QUEUE_FILTER_IDS = ["all", "mine", "available", "reappeared", "new", "rank", "pcm", "due"];
 
 function parseHash(hash: string): { tab: Tab; filter: string; owner: string } | null {
   const [rawTab, rawFilter = "", rawOwner = ""] = hash.replace(/^#/, "").split("/");
@@ -77,18 +77,60 @@ type Person = {
   source_notes?: string | null;
   source_period?: string | null;
   source_file_name?: string | null;
+  first_seen_period?: string | null;
+  last_seen_period?: string | null;
+  snapshot_period?: string | null;
+  is_reappeared?: boolean;
   last_contacted_at?: string | null;
   last_outcome?: string | null;
   notes?: string | null;
 };
 
+type ImportReportType = "new" | "rank" | "pcm" | "general";
+
+type ImportRow = {
+  external_id: string;
+  name: string;
+  email?: string;
+  phone?: string | null;
+  country?: string;
+  region?: string | null;
+  joined_at?: string | null;
+  current_rank?: string | null;
+  target_rank?: string | null;
+  gap_to_rank?: number | null;
+  is_new_distributor?: boolean;
+  is_rank_opportunity?: boolean;
+  is_pcm_opportunity?: boolean;
+  nearest_leader_name?: string | null;
+  highest_rank_name?: string | null;
+  first_time_at_rank?: boolean | null;
+  has_ten_pack?: boolean | null;
+  source_contacted_by?: string | null;
+  source_notes?: string | null;
+};
+
 type PendingImport = {
   fileName: string;
   sourcePeriod: string;
-  reportType: string;
-  records: Omit<Person, "id">[];
+  reportType: ImportReportType;
+  records: ImportRow[];
   newCount: number;
   updateCount: number;
+  reappearCount: number;
+};
+
+type ImportResult = { text: string; tone: "success" | "error" };
+
+type SnapshotHistory = {
+  period: string;
+  current_rank?: string | null;
+  target_rank?: string | null;
+  gap_to_rank?: number | null;
+  is_new_distributor: boolean;
+  is_rank_opportunity: boolean;
+  is_pcm_opportunity: boolean;
+  source_file_name?: string | null;
 };
 
 type ImportHistory = {
@@ -97,6 +139,8 @@ type ImportHistory = {
   row_count: number;
   imported_by_name?: string | null;
   status: "processing" | "complete" | "failed";
+  source_period?: string | null;
+  report_type?: ImportReportType | null;
   created_at: string;
 };
 
@@ -186,6 +230,12 @@ function formatPeriod(value?: string | null) {
   return new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(date);
 }
 
+function nextPeriod(value: string) {
+  const date = new Date(`${value}T00:00:00Z`);
+  date.setUTCMonth(date.getUTCMonth() + 1);
+  return date.toISOString().slice(0, 10);
+}
+
 const FOLLOW_UP_DUE_DAYS = 7;
 
 function daysSince(value?: string | null) {
@@ -232,6 +282,10 @@ function nullableNumber(value?: string) {
 
 function dateValue(value?: string) {
   if (!value?.trim()) return null;
+  if (/^\d+(?:\.\d+)?$/.test(value.trim())) {
+    const serial = Number(value.trim());
+    if (serial > 20_000 && serial < 100_000) return new Date(Date.UTC(1899, 11, 30) + serial * 86_400_000).toISOString().slice(0, 10);
+  }
   const iso = value.trim().match(/^\d{4}-\d{2}-\d{2}/)?.[0];
   if (iso) return iso;
   const parsed = new Date(value);
@@ -262,6 +316,18 @@ function inferSourcePeriod(fileName: string) {
   if (match) return `${match[2]}-${months[match[1]]}-01`;
   const now = new Date();
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+}
+
+function reportTypeLabel(value: ImportReportType) {
+  return value === "new" ? "New Distributor" : value === "rank" ? "Rank (D/SD/ED)" : value === "pcm" ? "PCM" : "General distributor";
+}
+
+function inferReportType(fileName: string, keys: Set<string>): ImportReportType {
+  const lowerFile = fileName.toLowerCase();
+  if (lowerFile.includes("pcm")) return "pcm";
+  if (lowerFile.includes("new") || keys.has("joined_date") || keys.has("10_pack") || keys.has("nearest_pcm_name") || keys.has("closest_pcm_name")) return "new";
+  if (lowerFile.includes("rank") || keys.has("running_for_rank") || keys.has("total_ov_needed")) return "rank";
+  return "general";
 }
 
 function parseCsv(text: string) {
@@ -350,6 +416,8 @@ export default function Home() {
   const [resendCountdown, setResendCountdown] = useState(0);
   const [tab, setTab] = useState<Tab>("overview");
   const [people, setPeople] = useState<Person[]>([]);
+  const [periods, setPeriods] = useState<string[]>([]);
+  const [selectedPeriod, setSelectedPeriod] = useState("");
   const [dataReady, setDataReady] = useState(false);
   const [dataError, setDataError] = useState("");
   const [isAdmin, setIsAdmin] = useState(false);
@@ -358,6 +426,8 @@ export default function Home() {
   const [activities, setActivities] = useState<Activity[]>([]);
   const [teamActivities, setTeamActivities] = useState<Activity[]>([]);
   const [activitiesLoading, setActivitiesLoading] = useState(false);
+  const [snapshotHistory, setSnapshotHistory] = useState<SnapshotHistory[]>([]);
+  const [snapshotHistoryLoading, setSnapshotHistoryLoading] = useState(false);
   const [queueFilter, setQueueFilter] = useState("all");
   const [countryFilter, setCountryFilter] = useState("all");
   const [stateFilter, setStateFilter] = useState("all");
@@ -370,7 +440,7 @@ export default function Home() {
   const activitySubmitLock = useRef(false);
   const [toast, setToast] = useState<{ text: string; tone: "success" | "error" } | null>(null);
   const [importBusy, setImportBusy] = useState(false);
-  const [importResult, setImportResult] = useState("");
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [pendingImport, setPendingImport] = useState<PendingImport | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [displayName, setDisplayName] = useState("");
@@ -387,6 +457,7 @@ export default function Home() {
   const [bulkAssignBusy, setBulkAssignBusy] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [ownerQueueName, setOwnerQueueName] = useState("");
+  const selectedPeriodRef = useRef("");
 
   const notify = useCallback((text: string) => setToast({ text, tone: "success" }), []);
   const notifyError = useCallback((text: string) => setToast({ text, tone: "error" }), []);
@@ -419,14 +490,60 @@ export default function Home() {
     return () => { active = false; };
   }, []);
 
-  const loadPeople = useCallback(async () => {
+  const loadSnapshotPeriods = useCallback(async () => {
+    if (!supabase || !userId) return "";
+    const values: string[] = [];
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase.from("distributor_snapshots").select("period").order("period", { ascending: false }).range(from, from + 999);
+      if (error) { setDataError(error.message); return ""; }
+      const page = (data ?? []).map((row) => row.period as string);
+      values.push(...page);
+      if (page.length < 1000) break;
+    }
+    const unique = [...new Set(values)].sort().reverse();
+    setPeriods(unique);
+    const next = selectedPeriodRef.current && unique.includes(selectedPeriodRef.current) ? selectedPeriodRef.current : unique[0] ?? "";
+    selectedPeriodRef.current = next;
+    setSelectedPeriod(next);
+    return next;
+  }, [supabase, userId]);
+
+  const loadPeople = useCallback(async (period?: string) => {
     if (!supabase || !userId) return;
+    const targetPeriod = period || selectedPeriodRef.current;
+    if (!targetPeriod) return;
     setDataError("");
     const records: Person[] = [];
     for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase.from("distributors").select("*").order("external_id").range(from, from + 999);
+      const { data, error } = await supabase
+        .from("distributor_snapshots")
+        .select("period,current_rank,target_rank,gap_to_rank,is_new_distributor,is_rank_opportunity,is_pcm_opportunity,nearest_leader_name,highest_rank_name,first_time_at_rank,has_ten_pack,source_contacted_by,source_notes,source_file_name,distributors!inner(*)")
+        .eq("period", targetPeriod)
+        .order("distributor_id")
+        .range(from, from + 999);
       if (error) { setDataError(error.message); setDataReady(true); return; }
-      const page = (data ?? []).map((record) => ({ ...record, gap_to_rank: record.gap_to_rank == null ? null : Number(record.gap_to_rank) })) as Person[];
+      const page = (data ?? []).map((snapshot) => {
+        const distributor = (Array.isArray(snapshot.distributors) ? snapshot.distributors[0] : snapshot.distributors) as Person;
+        return {
+          ...distributor,
+          current_rank: snapshot.current_rank,
+          target_rank: snapshot.target_rank,
+          gap_to_rank: snapshot.gap_to_rank == null ? null : Number(snapshot.gap_to_rank),
+          is_new_distributor: snapshot.is_new_distributor,
+          is_rank_opportunity: snapshot.is_rank_opportunity,
+          is_pcm_opportunity: snapshot.is_pcm_opportunity,
+          nearest_leader_name: snapshot.nearest_leader_name,
+          highest_rank_name: snapshot.highest_rank_name,
+          first_time_at_rank: snapshot.first_time_at_rank,
+          has_ten_pack: snapshot.has_ten_pack,
+          source_contacted_by: snapshot.source_contacted_by,
+          source_notes: snapshot.source_notes,
+          source_file_name: snapshot.source_file_name,
+          source_period: snapshot.period,
+          snapshot_period: snapshot.period,
+          is_reappeared: Boolean(distributor.first_seen_period && distributor.first_seen_period < snapshot.period),
+        } as Person;
+      });
       records.push(...page);
       if (page.length < 1000) break;
     }
@@ -515,22 +632,32 @@ export default function Home() {
         if (allowed?.owner) setOwnerQueueName(allowed.owner);
         setNavigationReady(true);
       }
-      await loadPeople();
+      const latestPeriod = await loadSnapshotPeriods();
+      await loadPeople(latestPeriod);
       await loadTeamActivities();
       if (admin) {
-        const { data } = await supabase?.from("imports").select("id,file_name,row_count,imported_by_name,status,created_at").order("created_at", { ascending: false }).limit(10) ?? { data: [] };
+        const { data } = await supabase?.from("imports").select("id,file_name,row_count,imported_by_name,status,source_period,report_type,created_at").order("created_at", { ascending: false }).limit(10) ?? { data: [] };
         if (active) setImports((data ?? []) as ImportHistory[]);
         await loadUsers();
       }
     }
     bootstrap();
     return () => { active = false; };
-  }, [loadPeople, loadTeamActivities, loadUsers, sessionTopupRole, supabase, userEmail, userId]);
+  }, [loadPeople, loadSnapshotPeriods, loadTeamActivities, loadUsers, sessionTopupRole, supabase, userEmail, userId]);
 
   useEffect(() => {
     if (!session || !userEmail || !navigationReady) return;
     window.localStorage.setItem(`${TAB_STORAGE_KEY}:${userEmail.toLowerCase()}`, tab);
   }, [navigationReady, session, tab, userEmail]);
+
+  const changePeriod = useCallback(async (period: string) => {
+    if (!period || period === selectedPeriodRef.current) return;
+    selectedPeriodRef.current = period;
+    setSelectedPeriod(period);
+    setSelected(null);
+    setSelectedQueueIds([]);
+    await loadPeople(period);
+  }, [loadPeople]);
 
   useEffect(() => {
     if (!profileOpen) return;
@@ -657,6 +784,7 @@ export default function Home() {
         || (queueFilter === "mine" ? personBelongsToUser(person, userId, userEmail)
           : queueFilter === "available" ? !person.assigned_to && !person.assigned_email && !person.assigned_name
           : queueFilter === "due" ? isFollowUpDue(person)
+          : queueFilter === "reappeared" ? person.is_reappeared
           : queueFilter === "rank" ? person.is_rank_opportunity
             : queueFilter === "pcm" ? person.is_pcm_opportunity
               : queueFilter === "new" ? person.is_new_distributor
@@ -733,7 +861,8 @@ export default function Home() {
 
   async function signOut() {
     if (supabase) await supabase.auth.signOut();
-    setSession(null); setSelected(null); setPeople([]); setUsers([]); setDisplayName(""); setProfileName(""); setProfileOpen(false); setIsAdmin(false); setNavigationReady(false);
+    selectedPeriodRef.current = "";
+    setSession(null); setSelected(null); setPeople([]); setPeriods([]); setSelectedPeriod(""); setSnapshotHistory([]); setPendingImport(null); setImportResult(null); setUsers([]); setDisplayName(""); setProfileName(""); setProfileOpen(false); setIsAdmin(false); setNavigationReady(false);
   }
 
   async function claim(person: Person) {
@@ -814,13 +943,14 @@ export default function Home() {
   async function openPerson(person: Person) {
     setSelected(person);
     setActivities([]);
+    setSnapshotHistory([]);
     if (!supabase || !session) return;
     setActivitiesLoading(true);
-    const { data, error } = await supabase
-      .from("activities")
-      .select("id,distributor_id,user_id,activity_type,outcome,notes,created_at,profiles!activities_user_id_fkey(full_name,email)")
-      .eq("distributor_id", person.id)
-      .order("created_at", { ascending: false });
+    setSnapshotHistoryLoading(true);
+    const [{ data, error }, { data: snapshots, error: snapshotError }] = await Promise.all([
+      supabase.from("activities").select("id,distributor_id,user_id,activity_type,outcome,notes,created_at,profiles!activities_user_id_fkey(full_name,email)").eq("distributor_id", person.id).order("created_at", { ascending: false }),
+      supabase.from("distributor_snapshots").select("period,current_rank,target_rank,gap_to_rank,is_new_distributor,is_rank_opportunity,is_pcm_opportunity,source_file_name").eq("distributor_id", person.id).order("period", { ascending: false }),
+    ]);
     if (error) {
       notifyError(`Activity history could not be loaded: ${error.message}`);
     } else {
@@ -839,7 +969,10 @@ export default function Home() {
       });
       setActivities(history);
     }
+    if (snapshotError) notifyError(`Monthly history could not be loaded: ${snapshotError.message}`);
+    else setSnapshotHistory((snapshots ?? []).map((snapshot) => ({ ...snapshot, gap_to_rank: snapshot.gap_to_rank == null ? null : Number(snapshot.gap_to_rank) })) as SnapshotHistory[]);
     setActivitiesLoading(false);
+    setSnapshotHistoryLoading(false);
   }
 
   async function release(person: Person) {
@@ -895,69 +1028,60 @@ export default function Home() {
   }
 
   async function prepareImport(file: File) {
-    if (!supabase || !session || !isAdmin) { setImportResult("Only a signed-in Top Up administrator can import data."); return; }
-    if (file.size > 10 * 1024 * 1024) { setImportResult("Import stopped: the CSV exceeds 10 MB."); return; }
-    setImportBusy(true); setImportResult(""); setPendingImport(null);
+    if (!supabase || !session || !isAdmin) { setImportResult({ text: "Only a signed-in Top Up administrator can import data.", tone: "error" }); return; }
+    if (file.size > 10 * 1024 * 1024) { setImportResult({ text: "Import stopped: the CSV exceeds 10 MB.", tone: "error" }); return; }
+    setImportBusy(true); setImportResult(null); setPendingImport(null);
     try {
       const rows = parseCsv(await file.text());
       if (!rows.length) throw new Error("Import stopped: the CSV has no data rows.");
       const keys = new Set(Object.keys(rows[0]));
-      const lowerFile = file.name.toLowerCase();
-      const newReport = lowerFile.includes("new") || keys.has("joined_date") || keys.has("10_pack") || keys.has("nearest_pcm_name");
-      const pcmReport = lowerFile.includes("pcm");
-      const rankReport = !newReport && !pcmReport && (lowerFile.includes("rank") || keys.has("running_for_rank"));
+      const reportType = inferReportType(file.name, keys);
       const parsed = rows.map((row, index) => ({ row, index: index + 2, id: normalizeId(row.dist_id || row.distributor_id || row.unicity_id || row.id || ""), name: (row.name || row.full_name || "").trim() }));
       const invalid = parsed.filter((item) => !item.id || !item.name);
       if (invalid.length) throw new Error(`Import stopped: ${invalid.length} row${invalid.length === 1 ? "" : "s"} are missing a valid distributor ID or name (first issue: row ${invalid[0].index}). No records were written.`);
-      const ids = [...new Set(parsed.map((item) => item.id))];
-      const existing = new Map<string, Person>();
+      const deduped = [...new Map(parsed.map((item) => [item.id, item])).values()];
+      const ids = deduped.map((item) => item.id);
+      const existing = new Map<string, Pick<Person, "external_id" | "first_seen_period" | "last_seen_period">>();
       for (let index = 0; index < ids.length; index += 200) {
-        const { data, error } = await supabase.from("distributors").select("*").in("external_id", ids.slice(index, index + 200));
+        const { data, error } = await supabase.from("distributors").select("external_id,first_seen_period,last_seen_period").in("external_id", ids.slice(index, index + 200));
         if (error) throw error;
-        (data ?? []).forEach((record) => existing.set(record.external_id, record as Person));
+        (data ?? []).forEach((record) => existing.set(record.external_id, record));
       }
       const sourcePeriod = inferSourcePeriod(file.name);
-      const records = parsed.map(({ row, id, name }) => {
-        const previous = existing.get(id);
+      const records = deduped.map(({ row, id, name }) => {
         const owner = normalizeOwner(row.contacted_by);
         const firstTimeRaw = row.first_time_at_rank?.trim().toLowerCase();
-        const isNew = newReport || booleanValue(row.is_new_distributor);
-        const isPcm = pcmReport || booleanValue(row.is_pcm_opportunity) || row.push_level?.toLowerCase() === "pcm";
-        const isRank = rankReport || booleanValue(row.is_rank_opportunity) || row.push_level?.toLowerCase() === "rank";
-        const currentRank = (row.current_rank_name || row.rank_name || row.current_rank || row.rank || previous?.current_rank || "").trim() || null;
+        const currentRank = (row.current_rank_name || row.rank_name || row.current_rank || row.rank || "").trim() || null;
         return {
           external_id: id,
           name,
-          email: (row.email_address || row.email || previous?.email || "").trim(),
-          phone: (row.cell_phone || row.phone || row.mobile || previous?.phone || "").trim() || null,
-          country: (row.country || previous?.country || "Unknown").trim(),
-          region: (row.state || row.region || previous?.region || "").trim() || null,
-          joined_at: dateValue(row.joined_date || row.join_date || row.date_joined || row.enrollment_date) || previous?.joined_at || null,
+          email: (row.email_address || row.email || "").trim(),
+          phone: (row.cell_phone || row.phone || row.mobile || "").trim() || null,
+          country: (row.home_country || row.country || "Unknown").trim(),
+          region: (row.state || row.region || "").trim() || null,
+          joined_at: dateValue(row.joined_date || row.join_date || row.date_joined || row.enrollment_date),
           current_rank: currentRank,
-          target_rank: (row.running_for_rank || row.next_rank || row.target_rank || previous?.target_rank || "").trim() || null,
-          gap_to_rank: nullableNumber(row.total_ov_needed || row.gap_to_rank || row.volume_needed) ?? previous?.gap_to_rank ?? null,
-          status: previous?.status && previous.status !== "unassigned" ? previous.status : owner ? "contacted" : "unassigned",
-          assigned_to: previous?.assigned_to ?? null,
-          assigned_email: previous?.assigned_email ?? null,
-          assigned_name: previous?.assigned_name ?? owner,
-          source_contacted_by: owner ?? previous?.source_contacted_by ?? null,
-          is_new_distributor: Boolean(previous?.is_new_distributor || isNew),
-          is_rank_opportunity: Boolean(previous?.is_rank_opportunity || isRank),
-          is_pcm_opportunity: Boolean(previous?.is_pcm_opportunity || isPcm),
-          nearest_leader_name: (row.nearest_leader_name || row.nearest_pcm_name || previous?.nearest_leader_name || "").trim() || null,
-          highest_rank_name: (row.highest_rank_name || previous?.highest_rank_name || "").trim() || null,
-          first_time_at_rank: firstTimeRaw ? firstTimeRaw.includes("first") : previous?.first_time_at_rank ?? null,
-          has_ten_pack: row["10_pack"] ? booleanValue(row["10_pack"]) : previous?.has_ten_pack ?? null,
-          source_notes: (row.notes || previous?.source_notes || "").trim() || null,
-          source_period: sourcePeriod,
-          source_file_name: file.name,
-        };
+          target_rank: (row.running_for_rank || row.next_rank || row.target_rank || "").trim() || null,
+          gap_to_rank: nullableNumber(row.total_ov_needed || row.gap_to_rank || row.volume_needed),
+          source_contacted_by: owner,
+          is_new_distributor: reportType === "new" || booleanValue(row.is_new_distributor),
+          is_rank_opportunity: reportType === "rank" || booleanValue(row.is_rank_opportunity) || row.push_level?.toLowerCase() === "rank",
+          is_pcm_opportunity: reportType === "pcm" || booleanValue(row.is_pcm_opportunity) || row.push_level?.toLowerCase() === "pcm",
+          nearest_leader_name: (row.nearest_leader_name || row.nearest_pcm_name || row.closest_pcm_name || "").trim() || null,
+          highest_rank_name: (row.highest_rank_name || "").trim() || null,
+          ...(firstTimeRaw ? { first_time_at_rank: firstTimeRaw.includes("first") || booleanValue(firstTimeRaw) } : {}),
+          ...(row["10_pack"]?.trim() ? { has_ten_pack: booleanValue(row["10_pack"]) } : {}),
+          source_notes: (row.notes || "").trim() || null,
+        } as ImportRow;
       });
       const newCount = ids.filter((id) => !existing.has(id)).length;
-      const reportType = newReport ? "New Distributor report" : pcmReport ? "PCM report" : rankReport ? "Rank (D/SD/ED) report" : "General distributor report";
-      setPendingImport({ fileName: file.name, sourcePeriod, reportType, records: records as Omit<Person, "id">[], newCount, updateCount: ids.length - newCount });
+      const reappearCount = ids.filter((id) => {
+        const record = existing.get(id);
+        return Boolean(record?.first_seen_period && record.first_seen_period < sourcePeriod && record.last_seen_period && record.last_seen_period < sourcePeriod);
+      }).length;
+      setPendingImport({ fileName: file.name, sourcePeriod, reportType, records, newCount, reappearCount, updateCount: ids.length - newCount - reappearCount });
     } catch (error) {
-      setImportResult(error instanceof Error ? error.message : "The CSV could not be read. No records were written.");
+      setImportResult({ text: error instanceof Error ? error.message : "The CSV could not be read. No records were written.", tone: "error" });
     } finally {
       setImportBusy(false);
     }
@@ -967,19 +1091,19 @@ export default function Home() {
     if (!supabase || !session || !isAdmin || !pendingImport) return;
     setImportBusy(true);
     try {
-      for (let index = 0; index < pendingImport.records.length; index += 200) {
-        const { error } = await supabase.from("distributors").upsert(pendingImport.records.slice(index, index + 200), { onConflict: "external_id" });
-        if (error) throw error;
-      }
-      const { error: historyError } = await supabase.from("imports").insert({ file_name: pendingImport.fileName, row_count: pendingImport.records.length, source_period: pendingImport.sourcePeriod, imported_by: session.user.id, imported_by_name: userName, status: "complete" });
-      if (historyError) throw historyError;
-      setImportResult(`${pendingImport.records.length.toLocaleString()} real records imported. Existing distributor IDs were updated without deleting activity or ownership.`);
+      const { data, error } = await supabase.rpc("import_report", { p_rows: pendingImport.records, p_period: pendingImport.sourcePeriod, p_file_name: pendingImport.fileName, p_report_type: pendingImport.reportType });
+      if (error) throw error;
+      const result = data as { row_count?: number; new_count?: number; update_count?: number; reappear_count?: number } | null;
+      setImportResult({ text: `${Number(result?.row_count ?? pendingImport.records.length).toLocaleString()} records imported atomically: ${Number(result?.new_count ?? pendingImport.newCount).toLocaleString()} new, ${Number(result?.reappear_count ?? pendingImport.reappearCount).toLocaleString()} reappeared, and ${Number(result?.update_count ?? pendingImport.updateCount).toLocaleString()} updated. Ownership, notes, and activity were preserved.`, tone: "success" });
       setPendingImport(null);
-      await loadPeople();
-      const { data } = await supabase.from("imports").select("id,file_name,row_count,imported_by_name,status,created_at").order("created_at", { ascending: false }).limit(10);
-      setImports((data ?? []) as ImportHistory[]);
+      await loadSnapshotPeriods();
+      selectedPeriodRef.current = pendingImport.sourcePeriod;
+      setSelectedPeriod(pendingImport.sourcePeriod);
+      await loadPeople(pendingImport.sourcePeriod);
+      const { data: history } = await supabase.from("imports").select("id,file_name,row_count,imported_by_name,status,source_period,report_type,created_at").order("created_at", { ascending: false }).limit(10);
+      setImports((history ?? []) as ImportHistory[]);
     } catch (error) {
-      setImportResult(error instanceof Error ? error.message : "Import failed before any records could be confirmed.");
+      setImportResult({ text: error instanceof Error ? error.message : "Import failed; the transaction was rolled back.", tone: "error" });
     } finally {
       setImportBusy(false);
     }
@@ -987,7 +1111,11 @@ export default function Home() {
 
   function cancelImport() {
     setPendingImport(null);
-    setImportResult("Import cancelled. No records were written.");
+    setImportResult({ text: "Import cancelled. No records were written.", tone: "success" });
+  }
+
+  function changePendingReportType(reportType: ImportReportType) {
+    setPendingImport((current) => current ? { ...current, reportType } : current);
   }
 
   function exportQueue() {
@@ -1019,7 +1147,8 @@ export default function Home() {
 
   const contacted = people.filter((person) => person.source_contacted_by || person.last_contacted_at).length;
   const coverage = people.length ? Math.round((contacted / people.length) * 100) : 0;
-  const sourcePeriod = formatPeriod(people.find((person) => person.source_period)?.source_period);
+  const sourcePeriod = formatPeriod(selectedPeriod || people.find((person) => person.source_period)?.source_period);
+  const monthlyActivities = selectedPeriod ? teamActivities.filter((activity) => activity.created_at >= `${selectedPeriod}T00:00:00` && activity.created_at < `${nextPeriod(selectedPeriod)}T00:00:00`) : [];
 
   function navigateTo(nextTab: Tab, resetQueue = false) {
     if (resetQueue) setQueueFilter("all");
@@ -1043,17 +1172,17 @@ export default function Home() {
       {isAdmin && <button className={tab === "imports" ? "active" : ""} onClick={() => navigateTo("imports")}><UploadCloud size={19} /> Imports</button>}
     </nav><div className="sidebar-bottom"><div className="close-card"><span>{sourcePeriod.toUpperCase()}</span><strong>{isAdmin ? "Source coverage" : "My Board"}</strong><p>{isAdmin ? `${contacted.toLocaleString()} of ${people.length.toLocaleString()} profiles have a recorded contact owner.` : `${people.filter((person) => personBelongsToUser(person, userId, userEmail)).length.toLocaleString()} distributors are currently assigned to you.`}</p>{isAdmin && <><div className="mini-progress"><i style={{ width: `${coverage}%` }} /></div><b>{coverage}% recorded</b></>}</div><button className="signout" onClick={signOut}><LogOut size={18} /> Sign out</button></div></aside>
       <main className="main-content">{dataError ? <DataState title="The live data could not be loaded" detail={dataError} /> : !dataReady ? <DataState title="Loading the real Top Up records" detail="Reading the secured source import…" loading /> : <>
-        {tab === "overview" && isAdmin && <Overview people={people} userName={userName} sourcePeriod={sourcePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}
-        {tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} />}
+        {tab === "overview" && isAdmin && <Overview people={people} monthlyActivities={monthlyActivities} userName={userName} sourcePeriod={sourcePeriod} periods={periods} selectedPeriod={selectedPeriod} onPeriodChange={changePeriod} onOpen={openPerson} onNavigate={setTab} onOpenQueue={(filter) => { setQueueFilter(filter); setTab("queue"); }} />}
+        {tab === "mine" && <Queue mode="mine" people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} periods={periods} selectedPeriod={selectedPeriod} onPeriodChange={changePeriod} onOpen={openPerson} onExport={exportQueue} />}
         {tab === "queue" && <>
-          <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} onOpen={openPerson} onExport={exportQueue} users={users} selectedIds={selectedQueueIds} setSelectedIds={setSelectedQueueIds} bulkBusy={bulkAssignBusy} onBulkAssign={bulkAssign} onBulkUnassign={bulkUnassign} ownerScope={ownerQueueName} onClearOwnerScope={() => setOwnerQueueName("")} />
+          <Queue mode={isAdmin ? "admin" : "team"} people={filteredPeople} allPeople={queuePool} userId={userId} query={query} setQuery={setQuery} filter={queueFilter} setFilter={setQueueFilter} country={countryFilter} setCountry={setCountryFilter} state={stateFilter} setState={setStateFilter} periods={periods} selectedPeriod={selectedPeriod} onPeriodChange={changePeriod} onOpen={openPerson} onExport={exportQueue} users={users} selectedIds={selectedQueueIds} setSelectedIds={setSelectedQueueIds} bulkBusy={bulkAssignBusy} onBulkAssign={bulkAssign} onBulkUnassign={bulkUnassign} ownerScope={ownerQueueName} onClearOwnerScope={() => setOwnerQueueName("")} />
         </>}
         {tab === "leaderboard" && <Leaderboard people={people} teamActivities={teamActivities} sourcePeriod={sourcePeriod} onOpenBoard={(name) => { setOwnerQueueName(name); setQueueFilter("all"); setSelectedQueueIds([]); setTab("queue"); }} />}
         {tab === "users" && isAdmin && <ManageUsers users={users} saving={userSaving} adminEmails={adminEmails} adminSaving={adminSaving} onSave={saveUserName} onAddAdmin={addAdministrator} />}
-        {tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} />}
+        {tab === "imports" && isAdmin && <Imports busy={importBusy} result={importResult} history={imports} pending={pendingImport} onImport={prepareImport} onConfirm={confirmImport} onCancel={cancelImport} onReportTypeChange={changePendingReportType} />}
       </>}</main>
     </div>
-    {selected && <PersonDrawer key={selected.id} person={selected} leader={selectedLeader} currentUserId={userId} isAdmin={isAdmin} users={users} activities={activities} activitiesLoading={activitiesLoading} releaseBusy={releaseBusy} onClose={() => setSelected(null)} onClaim={() => claim(selected)} onLog={() => setActivityOpen(true)} onRelease={() => release(selected)} onOpenLeader={openPerson} onAssign={(entry) => adminAssign(selected, entry)} />}
+    {selected && <PersonDrawer key={selected.id} person={selected} leader={selectedLeader} currentUserId={userId} isAdmin={isAdmin} users={users} activities={activities} activitiesLoading={activitiesLoading} snapshots={snapshotHistory} snapshotsLoading={snapshotHistoryLoading} releaseBusy={releaseBusy} onClose={() => setSelected(null)} onClaim={() => claim(selected)} onLog={() => setActivityOpen(true)} onRelease={() => release(selected)} onOpenLeader={openPerson} onAssign={(entry) => adminAssign(selected, entry)} />}
     {activityOpen && selected && <ActivityModal person={selected} type={activityType} setType={setActivityType} outcome={activityOutcome} setOutcome={setActivityOutcome} note={activityNote} setNote={setActivityNote} saving={activitySaving} onClose={() => { if (!activitySaving) setActivityOpen(false); }} onSave={saveActivity} />}
     {toast && <div className={toast.tone === "error" ? "toast toast-error" : "toast"} role="status" aria-live="polite">{toast.tone === "error" ? <CircleAlert size={18} /> : <Check size={18} />}{toast.text}</div>}
   </div>;
@@ -1063,19 +1192,24 @@ function DataState({ title, detail, loading }: { title: string; detail: string; 
   return <section className="panel data-state">{loading ? <Clock3 size={28} /> : <CircleAlert size={28} />}<h2>{title}</h2><p>{detail}</p></section>;
 }
 
-function Overview({ people, userName, sourcePeriod, onOpen, onNavigate, onOpenQueue }: { people: Person[]; userName: string; sourcePeriod: string; onOpen: (person: Person) => void; onNavigate: (tab: Tab) => void; onOpenQueue: (filter: string) => void }) {
-  const contacted = people.filter((person) => person.source_contacted_by || person.last_contacted_at).length;
+function PeriodPicker({ periods, value, onChange }: { periods: string[]; value: string; onChange: (period: string) => void }) {
+  return <label className="period-picker"><span>Report month</span><select value={value} onChange={(event) => onChange(event.target.value)} aria-label="Select report month">{periods.map((period) => <option key={period} value={period}>{formatPeriod(period)}</option>)}</select></label>;
+}
+
+function Overview({ people, monthlyActivities, userName, sourcePeriod, periods, selectedPeriod, onPeriodChange, onOpen, onNavigate, onOpenQueue }: { people: Person[]; monthlyActivities: Activity[]; userName: string; sourcePeriod: string; periods: string[]; selectedPeriod: string; onPeriodChange: (period: string) => void; onOpen: (person: Person) => void; onNavigate: (tab: Tab) => void; onOpenQueue: (filter: string) => void }) {
+  const contacted = new Set(monthlyActivities.map((activity) => activity.distributor_id)).size;
   const coverage = people.length ? Math.round((contacted / people.length) * 100) : 0;
   const unassigned = people.filter((person) => !person.assigned_name).length;
   const newCount = people.filter((person) => person.is_new_distributor).length;
+  const reappearedCount = people.filter((person) => person.is_reappeared).length;
   const rankCount = people.filter((person) => person.is_rank_opportunity).length;
   const pcmCount = people.filter((person) => person.is_pcm_opportunity).length;
   const myQueue = people.filter((person) => ownerMatchesUser(person.assigned_name, userName) || !person.assigned_name).slice(0, 4);
-  const team = getTeamMetrics(people).slice(0, 4);
+  const team = getTeamMetrics(people, monthlyActivities).slice(0, 4);
   const maxCategory = Math.max(newCount, rankCount, pcmCount, 1);
   return <>
-    <div className="page-heading"><div><span className="eyebrow">{sourcePeriod.toUpperCase()} SOURCE</span><h1>Welcome, {userName.split(" ")[0]}.</h1><p>Every figure below is calculated from the imported workbook.</p></div><button className="primary-button" onClick={() => onNavigate("queue")}><Target size={17} /> Open work queue</button></div>
-    <section className="close-hero"><div className="hero-copy"><div className="hero-icon"><Sparkles size={22} /></div><div><span>REAL SOURCE DATA</span><h2>{people.length.toLocaleString()} unique distributor profiles are live.</h2><p>{newCount.toLocaleString()} new distributors, {rankCount.toLocaleString()} rank opportunities, and {pcmCount.toLocaleString()} PCM opportunities were reconciled by distributor ID.</p></div></div><div className="hero-score"><div className="score-ring"><strong>{coverage}%</strong><span>recorded</span></div><div className="hero-metrics"><span><b>{contacted.toLocaleString()}</b> with owner</span><span><b>{unassigned.toLocaleString()}</b> unassigned</span></div></div></section>
+    <div className="page-heading"><div><span className="eyebrow">{sourcePeriod.toUpperCase()} SNAPSHOT</span><h1>Welcome, {userName.split(" ")[0]}.</h1><p>Every figure below is scoped to the selected monthly snapshot.</p></div><div className="heading-actions"><PeriodPicker periods={periods} value={selectedPeriod} onChange={onPeriodChange} /><button className="primary-button" onClick={() => onNavigate("queue")}><Target size={17} /> Open work queue</button></div></div>
+    <section className="close-hero"><div className="hero-copy"><div className="hero-icon"><Sparkles size={22} /></div><div><span>MONTHLY SOURCE DATA</span><h2>{people.length.toLocaleString()} distributor profiles appear in {sourcePeriod}.</h2><p>{newCount.toLocaleString()} new, {reappearedCount.toLocaleString()} back from an earlier month, {rankCount.toLocaleString()} rank opportunities, and {pcmCount.toLocaleString()} PCM opportunities.</p></div></div><div className="hero-score"><div className="score-ring"><strong>{coverage}%</strong><span>worked</span></div><div className="hero-metrics"><span><b>{contacted.toLocaleString()}</b> contacted this month</span><span><b>{unassigned.toLocaleString()}</b> unassigned</span></div></div></section>
     <section className="stat-grid"><Stat icon={<Users />} tone="blue" label="Unique profiles" value={people.length.toLocaleString()} detail="Reconciled by distributor ID" onClick={() => onOpenQueue("all")} /><Stat icon={<UserRoundCheck />} tone="violet" label="New distributors" value={newCount.toLocaleString()} detail="From the source workbook" onClick={() => onOpenQueue("new")} /><Stat icon={<Target />} tone="amber" label="Rank opportunities" value={rankCount.toLocaleString()} detail="Director through ED" onClick={() => onOpenQueue("rank")} /><Stat icon={<Medal />} tone="green" label="PCM opportunities" value={pcmCount.toLocaleString()} detail="Presidential pathway" onClick={() => onOpenQueue("pcm")} /></section>
     <section className="dashboard-grid"><div className="panel momentum-panel"><div className="panel-heading"><div><h3>Opportunity mix</h3><p>Real records by source category</p></div><span className="source-chip">{sourcePeriod}</span></div><div className="category-bars">{[{ label: "New distributors", value: newCount }, { label: "Rank push", value: rankCount }, { label: "PCM", value: pcmCount }].map((item) => <div className="category-row" key={item.label}><span>{item.label}</span><div><i style={{ width: `${Math.max(2, Math.round((item.value / maxCategory) * 100))}%` }} /></div><strong>{item.value.toLocaleString()}</strong></div>)}</div><div className="chart-summary"><span><i className="legend blue" /> Contact owner recorded <b>{contacted.toLocaleString()}</b></span><span><i className="legend pale" /> No owner recorded <b>{unassigned.toLocaleString()}</b></span><strong>{coverage}% coverage</strong></div></div><div className="panel leaderboard-mini"><div className="panel-heading"><div><h3>Team coverage</h3><p>Profiles attributed in the workbook</p></div><button className="link-button" onClick={() => onNavigate("leaderboard")}>View all <ChevronRight size={14} /></button></div><div className="team-list">{team.map((member, index) => <div className="team-row" key={member.name}><span className={`place place-${index + 1}`}>{index + 1}</span><div className="avatar small-avatar">{member.initials}</div><div className="team-name"><strong>{member.name}</strong><span>{member.assigned} profiles · {member.notes} notes</span></div><b>{member.assigned.toLocaleString()}</b></div>)}{!team.length && <div className="empty-inline">No source owners recorded.</div>}</div></div></section>
     <section className="panel priority-panel"><div className="panel-heading"><div><h3>Priority queue</h3><p>Unassigned and lowest-gap opportunities first</p></div><button className="link-button" onClick={() => onNavigate("queue")}>View full queue <ArrowRight size={14} /></button></div><div className="queue-table compact"><div className="queue-head"><span>Distributor</span><span>Country / State</span><span>Opportunity</span><span>Owner</span><span>Last touch</span><span>Status</span><span></span></div>{myQueue.map((person) => <PersonRow key={person.id} person={person} onOpen={onOpen} />)}{!myQueue.length && <div className="empty-inline">No profiles are available.</div>}</div></section>
@@ -1090,7 +1224,7 @@ function QueueSortHeader({ field, label, activeField, direction, onSort }: { fie
   return <button type="button" className={activeField === field ? "sort-header active" : "sort-header"} onClick={() => onSort(field)} aria-label={`Sort by ${label} ${activeField === field && direction === "asc" ? "descending" : "ascending"}`}>{label}<ArrowUpDown size={13} /></button>;
 }
 
-function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, onOpen, onExport, users = [], selectedIds = [], setSelectedIds, bulkBusy = false, onBulkAssign, onBulkUnassign, ownerScope = "", onClearOwnerScope }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; onOpen: (person: Person) => void; onExport: () => void; users?: UserDirectoryEntry[]; selectedIds?: string[]; setSelectedIds?: (ids: string[]) => void; bulkBusy?: boolean; onBulkAssign?: (entry: UserDirectoryEntry) => void; onBulkUnassign?: () => void; ownerScope?: string; onClearOwnerScope?: () => void }) {
+function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFilter, country, setCountry, state, setState, periods, selectedPeriod, onPeriodChange, onOpen, onExport, users = [], selectedIds = [], setSelectedIds, bulkBusy = false, onBulkAssign, onBulkUnassign, ownerScope = "", onClearOwnerScope }: { mode: "admin" | "mine" | "team"; people: Person[]; allPeople: Person[]; userId: string; query: string; setQuery: (value: string) => void; filter: string; setFilter: (value: string) => void; country: string; setCountry: (value: string) => void; state: string; setState: (value: string) => void; periods: string[]; selectedPeriod: string; onPeriodChange: (period: string) => void; onOpen: (person: Person) => void; onExport: () => void; users?: UserDirectoryEntry[]; selectedIds?: string[]; setSelectedIds?: (ids: string[]) => void; bulkBusy?: boolean; onBulkAssign?: (entry: UserDirectoryEntry) => void; onBulkUnassign?: () => void; ownerScope?: string; onClearOwnerScope?: () => void }) {
   const [agentEmail, setAgentEmail] = useState("");
   const [sortKey, setSortKey] = useState<QueueSortKey>("name");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
@@ -1105,6 +1239,7 @@ function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFi
     { id: "all", label: mode === "mine" ? "My Board" : "All", count: scopedPeople.length },
     ...(mode === "admin" ? [{ id: "mine", label: "My Board", count: scopedPeople.filter((person) => person.assigned_to === userId).length }] : []),
     ...(mode !== "mine" ? [{ id: "available", label: "Available", count: scopedPeople.filter((person) => !person.assigned_to && !person.assigned_name).length }] : []),
+    { id: "reappeared", label: "Reappeared", count: scopedPeople.filter((person) => person.is_reappeared).length },
     { id: "new", label: "New", count: scopedPeople.filter((person) => person.is_new_distributor).length },
     { id: "rank", label: "Rank push", count: scopedPeople.filter((person) => person.is_rank_opportunity).length },
     { id: "pcm", label: "PCM", count: scopedPeople.filter((person) => person.is_pcm_opportunity).length },
@@ -1132,7 +1267,7 @@ function Queue({ mode, people, allPeople, userId, query, setQuery, filter, setFi
     else { setSortKey(next); setSortDirection("asc"); }
   }
   return <>
-    <div className="page-heading queue-title"><div><span className="eyebrow">ONE PROFILE · ONE DISTRIBUTOR ID</span><h1>{heading}</h1><p>{description}</p></div><button className="secondary-button" onClick={onExport}><Download size={17} /> Export view</button></div>
+    <div className="page-heading queue-title"><div><span className="eyebrow">ONE PROFILE · ONE DISTRIBUTOR ID</span><h1>{heading}</h1><p>{description}</p></div><div className="heading-actions"><PeriodPicker periods={periods} value={selectedPeriod} onChange={onPeriodChange} /><button className="secondary-button" onClick={onExport}><Download size={17} /> Export view</button></div></div>
     {ownerScope && <div className="owner-scope-bar"><span>Showing <strong>{ownerScope}</strong>’s queue · {people.length.toLocaleString()} profiles</span><button type="button" className="text-button" onClick={onClearOwnerScope}>View full queue</button></div>}
     <div className="queue-toolbar"><div className="toolbar-actions"><div className="search-box"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search name, ID, country, state, rank or leader" /></div><div className="location-filters"><select className="filter-select" aria-label="Filter by country" value={country} onChange={(event) => { setCountry(event.target.value); setState("all"); }}><option value="all">All countries</option>{countries.map((item) => <option value={item} key={item}>{item}</option>)}</select><select className="filter-select" aria-label="Filter by state" value={state} onChange={(event) => setState(event.target.value)}><option value="all">All states</option>{states.map((item) => <option value={item} key={item}>{item}</option>)}</select></div></div><div className="filter-tabs">{filters.map((item) => <button className={filter === item.id ? "active" : ""} onClick={() => setFilter(item.id)} key={item.id}>{item.label}<span>{item.count}</span></button>)}</div></div>
     {searchTerm && <div className="search-summary" aria-live="polite"><strong>{people.length.toLocaleString()}</strong> {people.length === 1 ? "result" : "results"} for “{searchTerm}”</div>}
@@ -1147,7 +1282,7 @@ function PersonRow({ person, onOpen, query = "", selectable = false, selected = 
   const touchTitle = person.last_contacted_at ? formatDate(person.last_contacted_at) : person.source_contacted_by ? "Source workbook" : "No contact recorded";
   const dueDays = isFollowUpDue(person) ? daysSince(person.last_contacted_at) : null;
   const touchDetail = dueDays != null ? `Follow-up due · ${dueDays} days since contact` : person.last_outcome ?? person.source_notes ?? (person.source_contacted_by ? "Contact owner recorded" : "No activity yet");
-  return <div className="queue-row" role="button" tabIndex={0} onClick={() => onOpen(person)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(person); } }}>{selectable && <span className="select-cell" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${person.name}`} checked={selected} onChange={() => onSelect?.(person.id)} /></span>}<span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong><small className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} aria-label={`Open UID ${person.external_id} in Unicity Portal`}>UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small className={leaderMatch ? "match-reason" : undefined}>{leaderMatch ? `Leader: ${person.nearest_leader_name}` : pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></div>;
+  return <div className="queue-row" role="button" tabIndex={0} onClick={() => onOpen(person)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); onOpen(person); } }}>{selectable && <span className="select-cell" onClick={(event) => event.stopPropagation()}><input type="checkbox" aria-label={`Select ${person.name}`} checked={selected} onChange={() => onSelect?.(person.id)} /></span>}<span className="person-cell"><span className="avatar person-avatar">{initials(person.name)}</span><span><strong>{person.name}</strong>{person.is_reappeared && <b className="reappeared-badge">Back in {formatPeriod(person.snapshot_period).split(" ")[0]}</b>}<small className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer" onClick={(event) => event.stopPropagation()} aria-label={`Open UID ${person.external_id} in Unicity Portal`}>UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></small></span></span><span className="market-cell"><strong>{locationValue(person.country) || "Not provided"}</strong><small>{locationValue(person.region) || "State not provided"}</small></span><span className="opportunity-cell"><strong>{person.target_rank ?? person.current_rank ?? "Not provided"}</strong><small className={leaderMatch ? "match-reason" : undefined}>{leaderMatch ? `Leader: ${person.nearest_leader_name}` : pathway}</small></span><span className="owner-cell">{person.assigned_name ? <><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><span>{person.assigned_name}</span></> : <span className="unassigned">Unassigned</span>}</span><span className="touch-cell"><strong>{touchTitle}</strong><small className={dueDays != null ? "due-flag" : undefined}>{touchDetail}</small></span><span><Status status={person.status} /></span><ChevronRight size={17} /></div>;
 }
 
 function Status({ status }: { status: ContactStatus }) {
@@ -1195,12 +1330,30 @@ function UserEditor({ entry, saving, onSave }: { entry: UserDirectoryEntry; savi
   </div>;
 }
 
-function Imports({ busy, result, history, pending, onImport, onConfirm, onCancel }: { busy: boolean; result: string; history: ImportHistory[]; pending: PendingImport | null; onImport: (file: File) => void; onConfirm: () => void; onCancel: () => void }) {
+function Imports({ busy, result, history, pending, onImport, onConfirm, onCancel, onReportTypeChange }: { busy: boolean; result: ImportResult | null; history: ImportHistory[]; pending: PendingImport | null; onImport: (file: File) => void; onConfirm: () => void; onCancel: () => void; onReportTypeChange: (value: ImportReportType) => void }) {
   const [dragging, setDragging] = useState(false);
-  return <><div className="page-heading"><div><span className="eyebrow">ADMIN TOOLS</span><h1>Monthly data imports</h1><p>Import real CSV exports; existing distributor IDs update one shared profile.</p></div><div className="admin-badge"><ShieldCheck size={16} /> Admin only</div></div><section className="import-grid"><div className="panel import-panel"><div className="panel-heading"><div><h3>Upload report</h3><p>CSV files exported from the monthly workbook</p></div><FileSpreadsheet size={22} /></div>{pending ? <div className="import-preview"><div className="preview-head"><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{pending.fileName}</strong><span>{pending.reportType} · {formatPeriod(pending.sourcePeriod)}</span></div></div><div className="preview-stats"><div><strong>{pending.records.length.toLocaleString()}</strong><span>data rows</span></div><div><strong>{pending.newCount.toLocaleString()}</strong><span>new profiles</span></div><div><strong>{pending.updateCount.toLocaleString()}</strong><span>existing updated</span></div></div><p className="preview-note">Nothing has been written yet. Existing profiles keep their ownership, notes, and activity history; only fields present in this file are refreshed.</p><div className="preview-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>Cancel</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}><Check size={17} /> {busy ? "Importing…" : `Import ${pending.records.length.toLocaleString()} records`}</button></div></div> : <label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && onImport(event.target.files[0])} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Reading and validating…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, or PCM report</p><small>Maximum 10 MB</small></label>}{result && <div className={result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? "import-result error" : "import-result"}>{result.toLowerCase().includes("stopped") || result.toLowerCase().includes("failed") ? <CircleAlert size={17} /> : <Check size={17} />}{result}</div>}<div className="mapping-note"><CircleAlert size={17} /><p><strong>No fabricated fallback values</strong><span>Rows without a valid distributor ID or name stop the import before writes. Missing source fields stay visibly “Not provided.” Existing ownership and activity are preserved.</span></p></div></div><div className="panel import-guide"><div className="panel-heading"><div><h3>Import sequence</h3><p>Monthly operating rhythm</p></div></div><ol><li><span>1</span><div><strong>New Distributor</strong><p>Welcome outreach and 10 Pack tracking</p></div></li><li><span>2</span><div><strong>D, SD, ED</strong><p>Rank target and total OV needed</p></div></li><li><span>3</span><div><strong>PCMs</strong><p>Presidential pathway opportunities</p></div></li></ol><div className="privacy-card"><ShieldCheck size={20} /><div><strong>Protected employee workspace</strong><p>Distributor data is read only after verified @unicity.com authentication and row-level security.</p></div></div></div></section><section className="panel recent-imports"><div className="panel-heading"><div><h3>Recent imports</h3><p>Live audit trail from Supabase</p></div></div>{history.map((file) => <div className="import-row" key={file.id}><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{file.file_name}</strong><span>{Number(file.row_count).toLocaleString()} records · Imported by {file.imported_by_name ?? "System import"}</span></div><time>{formatDate(file.created_at)}</time><span className={`status status-${file.status === "complete" ? "complete" : "follow-up"}`}><i />{file.status}</span></div>)}{!history.length && <div className="empty-inline">No imports have been recorded yet.</div>}</section></>;
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">ADMIN TOOLS</span><h1>Monthly data imports</h1><p>Preview a monthly CSV, confirm its type, then commit every row in one transaction.</p></div><div className="admin-badge"><ShieldCheck size={16} /> Admin only</div></div>
+    <section className="import-grid">
+      <div className="panel import-panel">
+        <div className="panel-heading"><div><h3>Upload report</h3><p>CSV files exported from the monthly workbook</p></div><FileSpreadsheet size={22} /></div>
+        {pending ? <div className="import-preview">
+          <div className="preview-head"><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{pending.fileName}</strong><span>{formatPeriod(pending.sourcePeriod)}</span></div></div>
+          <label className="report-type-field">Report type<select value={pending.reportType} onChange={(event) => onReportTypeChange(event.target.value as ImportReportType)} disabled={busy}><option value="new">New Distributor</option><option value="rank">Rank (D/SD/ED)</option><option value="pcm">PCM</option><option value="general">General distributor</option></select></label>
+          <div className="preview-stats"><div><strong>{pending.records.length.toLocaleString()}</strong><span>data rows</span></div><div><strong>{pending.newCount.toLocaleString()}</strong><span>new profiles</span></div><div><strong>{pending.reappearCount.toLocaleString()}</strong><span>reappeared</span></div><div><strong>{pending.updateCount.toLocaleString()}</strong><span>existing updated</span></div></div>
+          <p className="preview-note">Nothing has been written yet. Confirmation calls one atomic database transaction; ownership, work status, notes, and activity history are preserved.</p>
+          <div className="preview-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>Cancel</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}><Check size={17} /> {busy ? "Importing…" : `Import ${pending.records.length.toLocaleString()} records`}</button></div>
+        </div> : <label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && onImport(event.target.files[0])} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Reading and validating…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, PCM, or general report</p><small>Maximum 10 MB</small></label>}
+        {result && <div className={result.tone === "error" ? "import-result error" : "import-result"}>{result.tone === "error" ? <CircleAlert size={17} /> : <Check size={17} />}{result.text}</div>}
+        <div className="mapping-note"><CircleAlert size={17} /><p><strong>All-or-nothing import</strong><span>Invalid IDs, names, or rank gaps reject the whole file. Missing source fields remain “Not provided,” and no partial batch can overwrite a prior month.</span></p></div>
+      </div>
+      <div className="panel import-guide"><div className="panel-heading"><div><h3>Import sequence</h3><p>Monthly operating rhythm</p></div></div><ol><li><span>1</span><div><strong>New Distributor</strong><p>Welcome outreach and 10 Pack tracking</p></div></li><li><span>2</span><div><strong>D, SD, ED</strong><p>Rank target and total OV needed</p></div></li><li><span>3</span><div><strong>PCMs</strong><p>Presidential pathway opportunities</p></div></li></ol><div className="privacy-card"><ShieldCheck size={20} /><div><strong>Protected employee workspace</strong><p>Distributor data is available only after verified @unicity.com authentication and row-level security.</p></div></div></div>
+    </section>
+    <section className="panel recent-imports"><div className="panel-heading"><div><h3>Recent imports</h3><p>Live audit trail from Supabase</p></div></div>{history.map((file) => <div className="import-row" key={file.id}><span className="file-icon"><FileSpreadsheet size={20} /></span><div><strong>{file.file_name}</strong><span>{Number(file.row_count).toLocaleString()} records · {file.report_type ? reportTypeLabel(file.report_type) : "Legacy import"} · {formatPeriod(file.source_period)} · Imported by {file.imported_by_name ?? "System import"}</span></div><time>{formatDate(file.created_at)}</time><span className={`status status-${file.status === "complete" ? "complete" : "follow-up"}`}><i />{file.status}</span></div>)}{!history.length && <div className="empty-inline">No imports have been recorded yet.</div>}</section>
+  </>;
 }
 
-function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activities, activitiesLoading, releaseBusy, onClose, onClaim, onLog, onRelease, onOpenLeader, onAssign }: { person: Person; leader: Person | null; currentUserId: string; isAdmin: boolean; users: UserDirectoryEntry[]; activities: Activity[]; activitiesLoading: boolean; releaseBusy: boolean; onClose: () => void; onClaim: () => void; onLog: () => void; onRelease: () => void; onOpenLeader: (person: Person) => void; onAssign: (entry: UserDirectoryEntry | null) => void }) {
+function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activities, activitiesLoading, snapshots, snapshotsLoading, releaseBusy, onClose, onClaim, onLog, onRelease, onOpenLeader, onAssign }: { person: Person; leader: Person | null; currentUserId: string; isAdmin: boolean; users: UserDirectoryEntry[]; activities: Activity[]; activitiesLoading: boolean; snapshots: SnapshotHistory[]; snapshotsLoading: boolean; releaseBusy: boolean; onClose: () => void; onClaim: () => void; onLog: () => void; onRelease: () => void; onOpenLeader: (person: Person) => void; onAssign: (entry: UserDirectoryEntry | null) => void }) {
   const linkedToUser = person.assigned_to === currentUserId;
   const canLink = !person.assigned_to && !person.assigned_name;
   const [closing, setClosing] = useState(false);
@@ -1231,10 +1384,11 @@ function PersonDrawer({ person, leader, currentUserId, isAdmin, users, activitie
   return <div className={`drawer-backdrop ${closing ? "is-closing" : "is-opening"}`} onMouseDown={(event) => event.target === event.currentTarget && closeDrawer()}>
     <aside className="drawer" role="dialog" aria-modal="true" aria-label={`Distributor profile for ${person.name}`}>
       <div className="drawer-header"><div><span className="eyebrow">DISTRIBUTOR PROFILE</span><h2>{person.name}</h2></div><button className="icon-button" onClick={closeDrawer} aria-label="Close profile"><X size={20} /></button></div>
-      <div className="profile-summary"><div className="avatar profile-avatar">{initials(person.name)}</div><div><strong>{person.name}</strong><span className="profile-meta"><span className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer">UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></span><span>· {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""} · Joined {person.joined_at ? new Date(`${person.joined_at}T00:00:00`).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" }) : "not provided"}</span></span>{person.email && <span className="profile-email"><Mail size={14} aria-hidden="true" /><span>{person.email}</span><CopyButton value={person.email} label={`${person.email} email`} /></span>}<div className="profile-tags">{person.is_new_distributor && <b>New distributor</b>}{person.is_rank_opportunity && <b>Rank push</b>}{person.is_pcm_opportunity && <b>PCM pathway</b>}{person.has_ten_pack && <b>10 Pack</b>}{person.first_time_at_rank === true && <b>First time at rank</b>}</div></div></div>
+      <div className="profile-summary"><div className="avatar profile-avatar">{initials(person.name)}</div><div><strong>{person.name}</strong><span className="profile-meta"><span className="uid-line"><a href={portalUrl(person.external_id)} target="_blank" rel="noopener noreferrer">UID: {person.external_id}<ExternalLink size={12} /></a><CopyButton value={person.external_id} label={`UID ${person.external_id}`} /></span><span>· {locationValue(person.country) || "Country not provided"}{locationValue(person.region) ? ` / ${locationValue(person.region)}` : ""} · Joined {person.joined_at ? new Date(`${person.joined_at}T00:00:00`).toLocaleDateString("en", { month: "short", day: "numeric", year: "numeric" }) : "not provided"}</span></span>{person.email && <span className="profile-email"><Mail size={14} aria-hidden="true" /><span>{person.email}</span><CopyButton value={person.email} label={`${person.email} email`} /></span>}<div className="profile-tags">{person.is_reappeared && <b className="reappeared-badge">Back in {formatPeriod(person.snapshot_period).split(" ")[0]}</b>}{person.is_new_distributor && <b>New distributor</b>}{person.is_rank_opportunity && <b>Rank push</b>}{person.is_pcm_opportunity && <b>PCM pathway</b>}{person.has_ten_pack && <b>10 Pack</b>}{person.first_time_at_rank === true && <b>First time at rank</b>}</div></div></div>
       <div className="contact-actions">{person.phone ? <a href={`tel:${person.phone}`}><Phone size={17} /> Call</a> : <span aria-disabled="true"><Phone size={17} /> No phone</span>}{person.email ? <a href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer"><Mail size={17} /> Email</a> : <span aria-disabled="true"><Mail size={17} /> No email</span>}{person.phone ? <a href={`https://wa.me/${person.phone.replace(/\D/g, "")}`} target="_blank" rel="noopener noreferrer"><MessageCircle size={17} /> WhatsApp</a> : <span aria-disabled="true"><MessageCircle size={17} /> No WhatsApp</span>}</div>
       <section className="profile-section"><h3>Opportunity</h3><div className="rank-path"><div><span>CURRENT RANK</span><strong>{person.current_rank ?? "Not provided"}</strong></div><ArrowRight size={18} /><div><span>RUNNING FOR</span><strong>{person.target_rank ?? "Not provided"}</strong></div></div><div className="volume-card"><div><span>Total OV needed</span><strong>{person.gap_to_rank == null ? "Not provided" : person.gap_to_rank.toLocaleString()}</strong></div><div><span>Highest rank</span><strong>{person.highest_rank_name ?? "Not provided"}</strong></div></div>{person.nearest_leader_name && (leader ? <button type="button" className="leader-card" onClick={() => onOpenLeader(leader)}><span className="avatar tiny-avatar">{initials(leader.name)}</span><span className="leader-info"><strong>{leader.name}</strong><small>Nearest leader · {leader.assigned_name ? `Working with ${leader.assigned_name}` : "Available to claim"}</small></span><Status status={leader.status} /><ChevronRight size={17} /></button> : <div className="source-detail"><span>Nearest leader</span><strong>{person.nearest_leader_name}</strong></div>)}</section>
       <section className="profile-section"><h3>Ownership</h3>{person.assigned_name ? <div className="owner-card"><span className="avatar tiny-avatar">{initials(person.assigned_name)}</span><div><strong>{person.assigned_name}</strong><span>{person.assigned_to ? "Linked Top Up owner" : "Owner recorded in source workbook"}</span></div><Status status={person.status} /></div> : <div className="unclaimed-card"><Users size={20} /><div><strong>This profile is available</strong><span>Claim it to add it to your personal queue.</span></div></div>}{isAdmin && users.length > 0 && <select className="filter-select assign-select" aria-label={`Assign ${person.name} to a team member`} value="" onChange={(event) => { const value = event.target.value; if (value === "__unassign__") onAssign(null); else { const entry = users.find((user) => user.email === value); if (entry) onAssign(entry); } }}><option value="" disabled>Assign to team member…</option>{person.assigned_name && <option value="__unassign__">Unassign — make available</option>}{users.map((user) => <option key={user.email} value={user.email}>{user.display_name}{user.display_name === person.assigned_name ? " (current)" : ""}</option>)}</select>}</section>
+      <section className="profile-section"><h3>Monthly history</h3>{snapshotsLoading ? <div className="no-activity"><Clock3 size={20} /> Loading monthly snapshots…</div> : <div className="snapshot-list">{snapshots.map((snapshot) => <div className={snapshot.period === person.snapshot_period ? "snapshot-row active" : "snapshot-row"} key={snapshot.period}><div><strong>{formatPeriod(snapshot.period)}</strong><span>{[snapshot.is_new_distributor && "New", snapshot.is_rank_opportunity && "Rank", snapshot.is_pcm_opportunity && "PCM"].filter(Boolean).join(" · ") || "General report"}</span></div><div><strong>{snapshot.current_rank ?? "Rank not provided"}</strong><span>{snapshot.target_rank ? `Running for ${snapshot.target_rank}` : "No target rank"}{snapshot.gap_to_rank != null ? ` · ${snapshot.gap_to_rank.toLocaleString()} OV needed` : ""}</span></div></div>)}{!snapshots.length && <div className="no-activity">No monthly snapshots are recorded.</div>}</div>}</section>
       <section className="profile-section"><h3>Activity history</h3><div className="timeline-list">{activitiesLoading ? <div className="no-activity"><Clock3 size={20} /> Loading preserved notes…</div> : activities.map((activity) => <div className="timeline" key={activity.id}><i /><div><strong>{activity.outcome}</strong><span>{formatDate(activity.created_at)} · {activity.author_name} · {activity.activity_type}</span>{activity.notes && <p>{activity.notes}</p>}</div></div>)}{person.source_notes || person.source_contacted_by ? <div className="timeline source-timeline"><i /><div><strong>Imported source record</strong><span>{person.source_contacted_by ? `Contacted By: ${person.source_contacted_by}` : "No Contacted By value"}</span>{person.source_notes && <p>{person.source_notes}</p>}</div></div> : null}{!activitiesLoading && !activities.length && !person.source_notes && !person.source_contacted_by && <div className="no-activity"><Clock3 size={20} /> No outreach is recorded yet.</div>}</div></section>
       <div className="drawer-footer">{canLink ? <div className="drawer-footer-actions"><button className="secondary-button" onClick={onClaim}><UserRoundCheck size={17} /> Claim profile</button><button className="primary-button" onClick={onLog}><MessageCircle size={17} /> Add team note</button></div> : linkedToUser ? <div className="drawer-footer-actions"><button className="secondary-button release-button" onClick={onRelease} disabled={releaseBusy}><Users size={17} /> {releaseBusy ? "Releasing…" : "Release"}</button><button className="primary-button" onClick={onLog}><MessageCircle size={17} /> Log an activity</button></div> : <div className="drawer-footer-actions"><button className="secondary-button" disabled><ShieldCheck size={17} /> Owned by {person.assigned_name}</button><button className="primary-button" onClick={onLog}><MessageCircle size={17} /> Add team note</button></div>}</div>
     </aside>
