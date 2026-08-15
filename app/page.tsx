@@ -325,7 +325,7 @@ function reportTypeLabel(value: ImportReportType) {
 function inferReportType(fileName: string, keys: Set<string>): ImportReportType {
   const lowerFile = fileName.toLowerCase();
   if (lowerFile.includes("pcm")) return "pcm";
-  if (lowerFile.includes("new") || keys.has("joined_date") || keys.has("10_pack") || keys.has("nearest_pcm_name") || keys.has("closest_pcm_name")) return "new";
+  if (/(^|[^a-z])new([^a-z]|$)/.test(lowerFile) || keys.has("joined_date") || keys.has("10_pack") || keys.has("nearest_pcm_name") || keys.has("closest_pcm_name")) return "new";
   if (lowerFile.includes("rank") || keys.has("running_for_rank") || keys.has("total_ov_needed")) return "rank";
   return "general";
 }
@@ -1064,9 +1064,9 @@ export default function Home() {
           target_rank: (row.running_for_rank || row.next_rank || row.target_rank || "").trim() || null,
           gap_to_rank: nullableNumber(row.total_ov_needed || row.gap_to_rank || row.volume_needed),
           source_contacted_by: owner,
-          is_new_distributor: reportType === "new" || booleanValue(row.is_new_distributor),
-          is_rank_opportunity: reportType === "rank" || booleanValue(row.is_rank_opportunity) || row.push_level?.toLowerCase() === "rank",
-          is_pcm_opportunity: reportType === "pcm" || booleanValue(row.is_pcm_opportunity) || row.push_level?.toLowerCase() === "pcm",
+          is_new_distributor: booleanValue(row.is_new_distributor),
+          is_rank_opportunity: booleanValue(row.is_rank_opportunity) || row.push_level?.toLowerCase() === "rank",
+          is_pcm_opportunity: booleanValue(row.is_pcm_opportunity) || row.push_level?.toLowerCase() === "pcm",
           nearest_leader_name: (row.nearest_leader_name || row.nearest_pcm_name || row.closest_pcm_name || "").trim() || null,
           highest_rank_name: (row.highest_rank_name || "").trim() || null,
           ...(firstTimeRaw ? { first_time_at_rank: firstTimeRaw.includes("first") || booleanValue(firstTimeRaw) } : {}),
@@ -1089,7 +1089,7 @@ export default function Home() {
 
   async function confirmImport() {
     if (!supabase || !session || !isAdmin || !pendingImport) return;
-    setImportBusy(true);
+    setImportBusy(true); setImportResult(null);
     try {
       const { data, error } = await supabase.rpc("import_report", { p_rows: pendingImport.records, p_period: pendingImport.sourcePeriod, p_file_name: pendingImport.fileName, p_report_type: pendingImport.reportType });
       if (error) throw error;
@@ -1343,7 +1343,7 @@ function Imports({ busy, result, history, pending, onImport, onConfirm, onCancel
           <div className="preview-stats"><div><strong>{pending.records.length.toLocaleString()}</strong><span>data rows</span></div><div><strong>{pending.newCount.toLocaleString()}</strong><span>new profiles</span></div><div><strong>{pending.reappearCount.toLocaleString()}</strong><span>reappeared</span></div><div><strong>{pending.updateCount.toLocaleString()}</strong><span>existing updated</span></div></div>
           <p className="preview-note">Nothing has been written yet. Confirmation calls one atomic database transaction; ownership, work status, notes, and activity history are preserved.</p>
           <div className="preview-actions"><button type="button" className="secondary-button" onClick={onCancel} disabled={busy}>Cancel</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}><Check size={17} /> {busy ? "Importing…" : `Import ${pending.records.length.toLocaleString()} records`}</button></div>
-        </div> : <label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => event.target.files?.[0] && onImport(event.target.files[0])} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Reading and validating…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, PCM, or general report</p><small>Maximum 10 MB</small></label>}
+        </div> : <label className={`dropzone ${dragging ? "dragging" : ""}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={(event) => { event.preventDefault(); setDragging(false); const file = event.dataTransfer.files[0]; if (file) onImport(file); }}><input type="file" accept=".csv,text/csv" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) onImport(file); }} /><span className="upload-icon"><UploadCloud size={28} /></span><strong>{busy ? "Reading and validating…" : "Drop a CSV here or browse"}</strong><p>New Distributor, D/SD/ED, PCM, or general report</p><small>Maximum 10 MB</small></label>}
         {result && <div className={result.tone === "error" ? "import-result error" : "import-result"}>{result.tone === "error" ? <CircleAlert size={17} /> : <Check size={17} />}{result.text}</div>}
         <div className="mapping-note"><CircleAlert size={17} /><p><strong>All-or-nothing import</strong><span>Invalid IDs, names, or rank gaps reject the whole file. Missing source fields remain “Not provided,” and no partial batch can overwrite a prior month.</span></p></div>
       </div>
