@@ -338,3 +338,26 @@ test("places search first and sorts queue columns", async () => {
   assert.match(page, /<QueueSortHeader field="touch" label="Last touch"/);
   assert.match(page, /sortedPeople\.map/);
 });
+
+test("imports monthly reports atomically into preserved snapshots", async () => {
+  const [page, migration] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../supabase/migrations/20260815171418_monthly_snapshots.sql", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /\.rpc\("import_report"/);
+  assert.doesNotMatch(page, /\.from\("distributors"\)\.upsert/);
+  assert.match(migration, /create table if not exists public\.distributor_snapshots/);
+  assert.match(migration, /security definer\s+set search_path = ''/);
+  assert.match(migration, /on conflict \(distributor_id, period\) do update/);
+  assert.match(migration, /status in \('contacted'::public\.contact_status, 'complete'::public\.contact_status\)/);
+  assert.match(migration, /grant execute on function public\.import_report/);
+});
+
+test("shows monthly selection, reappearances, and profile snapshot history", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /function PeriodPicker/);
+  assert.match(page, /label: "Reappeared"/);
+  assert.match(page, /Back in \{formatPeriod\(person\.snapshot_period\)/);
+  assert.match(page, /<h3>Monthly history<\/h3>/);
+  assert.match(page, /monthlyActivities/);
+});
