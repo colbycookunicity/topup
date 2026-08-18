@@ -367,3 +367,14 @@ test("email action composes a Gmail message to the distributor", async () => {
   assert.match(page, /mail\.google\.com\/mail\/u\/0\/\?view=cm&fs=1&to=\$\{encodeURIComponent\(person\.email\)\}/);
   assert.doesNotMatch(page, /mail\.google\.com\/mail\/u\/0\/#inbox/);
 });
+
+test("links the call script for new distributors beside the contact actions", async () => {
+  const [page, css] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/globals.css", import.meta.url), "utf8"),
+  ]);
+  assert.match(page, /const NEW_DISTRIBUTOR_SCRIPT_URL = "https:\/\/docs\.google\.com\/document\/d\/1ZzYTuTRf2CHTZSXFt4d5BHaRSOV7W3QS6z4bYujOUEE\/edit\?tab=t\.0"/);
+  assert.match(page, /\{person\.is_new_distributor && <a href=\{NEW_DISTRIBUTOR_SCRIPT_URL\} target="_blank" rel="noopener noreferrer"/);
+  assert.match(css, /\.contact-actions \{ display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; border-bottom: 1px solid var\(--line\); \}/);
+  assert.doesNotMatch(css, /\.contact-actions \{ grid-template-columns: repeat\(\d, 1fr\); \}/);
+});
